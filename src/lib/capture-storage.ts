@@ -31,6 +31,8 @@ export type CaptureAttachment = {
   name: string;
   mimeType: string;
   size: number;
+  /** Present for files stored in the private Supabase bucket. */
+  storagePath?: string;
 };
 
 export type ProjectStatus = "Idea" | "Planning" | "Active" | "Paused" | "Completed" | "Cancelled" | "Archived";

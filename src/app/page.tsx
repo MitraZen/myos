@@ -6,6 +6,8 @@ import type { FormEvent, KeyboardEvent } from "react";
 import { CaptureAttachment, CaptureRecord, CaptureType, loadCaptures, ProjectStatus, storeCaptures } from "@/lib/capture-storage";
 import { loadAttachment, removeAttachment, storeAttachment } from "@/lib/attachment-storage";
 import { AudioRecordingSession, normalizeMedia, startAudioRecording } from "@/lib/media-normalizer";
+import { deleteCloudCapture, getCloudAttachmentUrl, getSupabase, loadCloudCaptures, saveCloudCapture, supabaseConfigured, upsertCaptureRows } from "@/lib/supabase";
+import type { User } from "@supabase/supabase-js";
 
 const captureTypes: CaptureType[] = ["Capture", "Knowledge", "Idea", "Project", "Decision", "Milestone", "Goal", "Journal", "Book", "Resource", "Task", "Person"];
 const navigation = ["Home", "Timeline", "Knowledge", "Projects", "Decisions", "Milestones", "Ideas"];
@@ -57,6 +59,13 @@ function dateLabel(iso: string): string {
 export default function Home() {
   const [captures, setCaptures] = useState<CaptureRecord[]>([]);
   const [ready, setReady] = useState(false);
+  const [user, setUser] = useState<User | null>(null);
+  const [authReady, setAuthReady] = useState(!supabaseConfigured);
+  const [authEmail, setAuthEmail] = useState("");
+  const [authMessage, setAuthMessage] = useState("");
+  const [authBusy, setAuthBusy] = useState(false);
+  const [localImportCount, setLocalImportCount] = useState(0);
+  const [cloudBusy, setCloudBusy] = useState(false);
   const [storageError, setStorageError] = useState("");
   const [storageBlocked, setStorageBlocked] = useState(false);
   const [active, setActive] = useState("Home");
@@ -87,18 +96,59 @@ export default function Home() {
   const editor = useRef<HTMLTextAreaElement>(null);
   const attachmentInput = useRef<HTMLInputElement>(null);
   const audioRecording = useRef<AudioRecordingSession | null>(null);
+  const preservedLocalCaptures = useRef<CaptureRecord[]>([]);
 
   useEffect(() => {
-    try {
-      // localStorage is client-only, so initialize captures after hydration.
-      // eslint-disable-next-line react-hooks/set-state-in-effect
-      setCaptures(loadCaptures());
-    } catch {
-      setStorageBlocked(true);
-      setStorageError("Saved data could not be read. It remains in this browser and was not changed.");
-    } finally {
+    let cancelled = false;
+    const client = getSupabase();
+    const readLocal = () => {
+      try {
+        const local = loadCaptures();
+        preservedLocalCaptures.current = local;
+        return local;
+      }
+      catch {
+        setStorageBlocked(true);
+        setStorageError("Saved data could not be read. It remains in this browser and was not changed.");
+        return [];
+      }
+    };
+    let localCache: CaptureRecord[] = [];
+    let activeUser: User | null = null;
+    if (!client) {
+      localCache = readLocal();
+      setCaptures(localCache);
       setReady(true);
+      return;
     }
+    void client.auth.getSession().then(async ({ data, error }) => {
+      if (error) throw error;
+      if (cancelled) return;
+      const signedInUser = data.session?.user ?? null;
+      activeUser = signedInUser;
+      setUser(signedInUser);
+      if (!signedInUser) { setReady(true); return; }
+      const local = readLocal();
+      localCache = local;
+      const remote = await loadCloudCaptures(signedInUser.id);
+      if (cancelled) return;
+      setCaptures(remote);
+      setLocalImportCount(local.filter((item) => !remote.some((cloud) => cloud.id === item.id)).length);
+      setReady(true);
+    }).catch((error: unknown) => {
+      if (cancelled) return;
+      setCaptures(localCache);
+      if (activeUser) setLocalImportCount(localCache.length);
+      setStorageError(error instanceof Error ? `Supabase could not be reached: ${error.message}` : "Supabase could not be reached.");
+      setReady(true);
+    }).finally(() => { if (!cancelled) setAuthReady(true); });
+    const { data: { subscription } } = client.auth.onAuthStateChange((_event, session) => {
+      if (cancelled) return;
+      setUser(session?.user ?? null);
+      if (!session?.user) { setCaptures([]); setReady(true); }
+      else window.location.reload();
+    });
+    return () => { cancelled = true; subscription.unsubscribe(); };
   }, []);
 
 
@@ -112,8 +162,9 @@ export default function Home() {
     const urls: Record<string, string> = {};
     Promise.all(selected.attachments.map(async (attachment) => {
       try {
-        const blob = await loadAttachment(attachment.id);
-        if (blob) urls[attachment.id] = URL.createObjectURL(blob);
+        const blob = attachment.storagePath ? null : await loadAttachment(attachment.id);
+        if (attachment.storagePath) urls[attachment.id] = await getCloudAttachmentUrl(attachment.storagePath);
+        else if (blob) urls[attachment.id] = URL.createObjectURL(blob);
       } catch {
         // A missing local file is surfaced as unavailable in the detail view.
       }
@@ -235,7 +286,9 @@ export default function Home() {
   function persistCaptures(next: CaptureRecord[]): boolean {
     if (storageBlocked) return false;
     try {
-      storeCaptures(next);
+      const nextIds = new Set(next.map((item) => item.id));
+      const preserved = user ? preservedLocalCaptures.current.filter((item) => !nextIds.has(item.id)) : [];
+      storeCaptures([...preserved, ...next]);
       setCaptures(next);
       setStorageError("");
       return true;
@@ -243,6 +296,38 @@ export default function Home() {
       setStorageError("This browser could not save your latest changes. Copy any new text before closing this page.");
       return false;
     }
+  }
+
+  async function requestMagicLink(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (authBusy) return;
+    const client = getSupabase();
+    if (!client || !authEmail.trim()) return;
+    setAuthBusy(true);
+    setAuthMessage("");
+    const { error } = await client.auth.signInWithOtp({ email: authEmail.trim(), options: { emailRedirectTo: window.location.origin } });
+    setAuthMessage(error ? error.message : "Check your email for a secure sign-in link.");
+    setAuthBusy(false);
+  }
+
+  async function importLocalCaptures() {
+    if (!user || cloudBusy) return;
+    setCloudBusy(true);
+    setStorageError("");
+    try {
+      const local = loadCaptures();
+      const knownIds = new Set(captures.map((item) => item.id));
+      const additions = local.filter((item) => !knownIds.has(item.id));
+      await upsertCaptureRows(user.id, additions);
+      for (const capture of additions) await saveCloudCapture(user.id, capture);
+      const merged = [...additions, ...captures];
+      if (!persistCaptures(merged)) throw new Error("Cloud import finished, but this browser could not update its local copy.");
+      preservedLocalCaptures.current = [];
+      setLocalImportCount(0);
+      setStorageError(additions.length ? `${additions.length} local ${additions.length === 1 ? "capture was" : "captures were"} added to your account.` : "There are no new local captures to import.");
+    } catch (error) {
+      setStorageError(error instanceof Error ? `Import stopped safely: ${error.message}` : "Import stopped safely. Your local data remains unchanged.");
+    } finally { setCloudBusy(false); }
   }
 
   function clearDraftAttachments() {
@@ -425,6 +510,13 @@ export default function Home() {
         next = [capture, ...captures];
       }
       if (!persistCaptures(next)) throw new Error("The capture could not be saved. Your existing attachment files were kept.");
+      if (user) {
+        const savedCapture = next.find((item) => item.id === (editingId ?? next[0]?.id));
+        if (savedCapture) {
+          try { await saveCloudCapture(user.id, savedCapture); }
+          catch (error) { setStorageError(`Saved on this device, but cloud sync failed: ${error instanceof Error ? error.message : "please retry"}`); }
+        }
+      }
 
       const removedAttachments = editingId
         ? (captures.find((item) => item.id === editingId)?.attachments ?? []).filter((item) => !attachmentList.some((current) => current.id === item.id))
@@ -451,6 +543,7 @@ export default function Home() {
     })));
     if (!saved) return;
     void Promise.all((capture.attachments ?? []).map((item) => removeAttachment(item.id).catch(() => undefined)));
+    if (user) void deleteCloudCapture(user.id, capture.id).catch((error: unknown) => setStorageError(`Deleted locally, but cloud delete failed: ${error instanceof Error ? error.message : "please retry"}`));
     setSelected(null);
   }
 
@@ -483,6 +576,9 @@ export default function Home() {
   }
 
   return (
+    supabaseConfigured && authReady && !user ? <main className="auth-shell"><form className="auth-panel" onSubmit={requestMagicLink}><div className="brand auth-brand"><span className="brand-mark">m</span><span>myos<span className="brand-period">.</span></span></div><div className="eyebrow"><span className="eyebrow-line"/> PRIVATE PERSONAL ARCHIVE</div><h1>Sign in to your space.</h1><p>Your captures stay private to your account and sync across your devices.</p><label htmlFor="auth-email">Email address</label><input id="auth-email" type="email" autoComplete="email" required value={authEmail} onChange={(event) => setAuthEmail(event.target.value)} placeholder="you@example.com"/><button className="save-button" type="submit" disabled={authBusy}>{authBusy ? "Sending…" : "Email me a sign-in link"}</button>{authMessage && <p className="auth-message" role="status">{authMessage}</p>}{storageError && <p className="auth-message auth-error" role="alert">{storageError}</p>}<small>Supabase authentication is enabled. Local captures on this device will be offered for import after sign-in.</small></form></main>
+    : supabaseConfigured && !authReady ? <main className="auth-shell"><p>Connecting securely…</p></main>
+    :
     <main className="app-shell">
       <aside className="sidebar">
         <a className="brand" href="#home" onClick={() => setActive("Home")}><span className="brand-mark">m</span><span>myos<span className="brand-period">.</span></span></a>
@@ -490,7 +586,7 @@ export default function Home() {
         <div className="nav-label">WORKSPACE</div>
         <nav className="primary-nav" aria-label="Primary navigation">{navigation.map((item) => <button key={item} className={`nav-item ${active === item ? "selected" : ""}`} onClick={() => { if (item === "Timeline") { showTimeline(); return; } setActive(item); setQuery(""); }}><span className="nav-icon">{icons[item]}</span>{item}{item === "Knowledge" && <span className="nav-count">{captures.filter((capture) => capture.type === "Knowledge").length}</span>}</button>)}</nav>
         <button className={`nav-item search-nav ${active === "Search" ? "selected" : ""}`} onClick={() => { setCommandQuery(""); setActive("Search"); setQuery(""); document.getElementById("global-search")?.focus(); }}><span className="nav-icon"><SearchIcon /></span>Search<span className="search-shortcut">⌘ K</span></button>
-        <div className="sidebar-bottom"><div className="privacy-note"><span className="privacy-dot"/><span>Saved on this device<br/><small>Not synced or backed up.</small></span></div><div className="profile-button"><span className="avatar">m</span><span className="profile-name">My workspace<small>Local storage</small></span></div></div>
+        <div className="sidebar-bottom"><div className="privacy-note"><span className="privacy-dot"/><span>{user ? "Synced to your account" : "Saved on this device"}<br/><small>{user?.email ?? "Not synced or backed up."}</small></span></div><div className="profile-button"><span className="avatar">m</span><span className="profile-name">{user?.email ?? "My workspace"}<small>{user ? "Private cloud sync" : "Local storage"}</small></span>{user && <button className="signout-button" onClick={() => void getSupabase()?.auth.signOut()} aria-label="Sign out">↗</button>}</div></div>
       </aside>
 
       <section className="main-column">
@@ -503,6 +599,7 @@ export default function Home() {
           <div className="section-heading"><div><div className="section-kicker">{active === "Timeline" ? "PERSONAL HISTORY" : ready ? `${captures.length} SAVED ${captures.length === 1 ? "ITEM" : "ITEMS"}` : "LOADING YOUR SPACE"}</div><h2>{query ? "Search results" : active === "Timeline" ? timelineRangeLabel(timelineDate || localDateValue(new Date()), timelineView) : active === "Home" ? "Recent captures" : active}</h2></div>{active === "Timeline" ? <div className="timeline-controls"><button className="timeline-nav-button" aria-label="Previous period" onClick={() => moveTimeline(-1)}>‹</button><input aria-label="Jump to date" type="date" value={timelineDate || localDateValue(new Date())} onChange={(event) => setTimelineDate(event.target.value)}/><button className="timeline-nav-button" aria-label="Next period" onClick={() => moveTimeline(1)}>›</button><select aria-label="Timeline view" value={timelineView} onChange={(event) => setTimelineView(event.target.value as TimelineView)}><option value="year">Year</option><option value="month">Month</option><option value="day">Day</option></select><select aria-label="Filter captures by type" value={timelineType} onChange={(event) => setTimelineType(event.target.value)}><option>All types</option>{captureTypes.map((captureType) => <option key={captureType}>{captureType}</option>)}</select><button className="timeline-today" onClick={() => setTimelineDate(localDateValue(new Date()))}>Today</button></div> : active === "Projects" ? <button className="date-link" onClick={() => openNewCapture("Project")}>＋ New project</button> : <button className="date-link" onClick={showTimeline}>Timeline <span>→</span></button>}</div>
 
           {storageError && <p className="storage-alert" role="status">{storageError}</p>}
+          {user && localImportCount > 0 && <section className="import-banner"><div><strong>{localImportCount} capture{localImportCount === 1 ? "" : "s"} saved on this device</strong><p>Add them to your private account to see them on your other devices. Existing account records will be kept.</p></div><button className="save-button" onClick={() => void importLocalCaptures()} disabled={cloudBusy}>{cloudBusy ? "Adding…" : "Add to my account"}</button></section>}
           <div className="content-grid"><section className="activity-column"><div className="timeline-day"><div className="timeline-date"><span className="timeline-day-num">⌂</span><span>LOCAL<br/>LIBRARY</span></div><div className="timeline-rule"/><div className="day-activity"><span className="activity-pip"/><span>{timelineCaptures.length ? `${timelineCaptures.length} ${timelineCaptures.length === 1 ? "capture" : "captures"}` : ready ? "Your library is quiet" : "Loading"}</span></div></div>
             {active === "Projects" ? <div className="project-list">{projects.map((project) => <button type="button" className="project-list-row" key={project.id} onClick={() => setSelected(project)}><span className="project-list-symbol">▱</span><span className="project-list-copy"><strong>{project.title}</strong><small>{project.content || "No description yet."}</small></span><span className={`project-status status-${(project.projectStatus ?? "Active").toLowerCase()}`}>{project.projectStatus ?? "Active"}</span><span className="project-related-count">{linkedToProject(project.id).length} linked</span><span className="project-list-arrow">→</span></button>)}{projects.length === 0 && <div className="empty-state"><span className="empty-icon">▱</span><h3>{ready ? "Start a project" : "Loading your projects…"}</h3><p>Give an active effort a home. Related captures and knowledge can be linked as you go.</p><button onClick={() => openNewCapture("Project")}>＋ Create a project</button></div>}</div> : timelineCaptures.length ? <div className="capture-list">{captureGroups.map((group) => <section className="capture-group" key={group.key}>{group.label && <h3 className="timeline-group-title">{group.label}</h3>}{group.captures.map((item) => <article className="capture-row" key={item.id}><div className={`type-marker marker-${item.type.toLowerCase()}`}>{item.type === "Knowledge" ? "▤" : item.type === "Decision" ? "◇" : item.type === "Idea" ? "✧" : item.type === "Project" ? "▱" : "·"}</div><button type="button" className="capture-body capture-open-button" aria-label={`Open ${item.title}`} onClick={() => setSelected(item)}><div className="capture-meta"><span className={`type-label label-${item.type.toLowerCase()}`}>{item.type}</span><span className="meta-dot">·</span><span>{dateLabel(item.createdAt)}</span>{item.updatedAt !== item.createdAt && <span className="edited-label">Edited</span>}</div><h3>{item.title}</h3><p>{item.content || "No additional content."}</p></button><button className="more-button" aria-label={`Open ${item.title}`} onClick={(event) => { event.stopPropagation(); setSelected(item); }}>···</button></article>)}</section>)}</div> : <div className="empty-state"><span className="empty-icon">⌕</span><h3>{ready ? query ? "No matches yet" : active === "Timeline" ? "No captures in this period" : "Nothing captured yet" : "Loading your captures…"}</h3><p>{ready ? query ? "Try another search, or capture a thought to start building your library." : active === "Timeline" ? "Choose another date or time range, or capture a thought to start your history." : "Save the thought first. Add context whenever you are ready." : ""}</p>{ready && <button onClick={() => openNewCapture()}>＋ Capture something</button>}</div>}
             {active !== "Timeline" && <button className="see-all" onClick={showTimeline}>View timeline <span>→</span></button>}

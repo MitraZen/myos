@@ -1,6 +1,6 @@
 # Supabase foundation
 
-This directory contains the first cloud-schema migration. The app continues using localStorage and IndexedDB until authentication and a user-confirmed local-data import are implemented.
+This directory contains the cloud schema and setup instructions. The app keeps a local browser copy and uses Supabase Auth, Postgres, and private Storage for signed-in cloud data.
 
 ## Apply the initial schema
 
@@ -21,6 +21,15 @@ Run this on a clean MYOS project. The migration creates owner-only RLS policies 
 
 Every application table has RLS enabled and owner-scoped policies. Storage object paths are scoped to the authenticated user's ID.
 
-## Important
+## Connect the app
 
-Do not put a Supabase service-role key in the browser, `.env.local`, or Vercel's `NEXT_PUBLIC_*` variables. The app will use the publishable key with authenticated sessions and RLS. A later integration step will add the client, sign-in, and an explicit migration flow for local captures and IndexedDB attachments.
+1. Copy `.env.example` to `.env.local` and fill in the project's **Project URL** and **publishable key** from Supabase project settings.
+2. In Supabase **Authentication → URL Configuration**, add your local app URL (`http://localhost:3000`) and deployed Vercel URL to the allowed redirect URLs. Set the Site URL to your primary app URL.
+3. Keep email sign-in enabled. For a private personal archive, disable public sign-ups after the first account is created (or create the account first), so only the intended user can authenticate.
+4. Run `npm run dev`, enter your email, and open the sign-in link on the same browser/device.
+5. On first sign-in, MYOS shows any captures already saved in that browser. Choose **Add to my account** to add missing records and their locally available attachments. Import is additive: existing cloud rows remain unchanged, and this browser's local data is retained.
+6. Add the two environment variables to Vercel for Production, Preview, and Development as needed, then redeploy.
+
+The app uses only the publishable key in the browser. Never put a Supabase service-role or secret key in `.env.local`, client code, or any `NEXT_PUBLIC_*` variable. Authenticated requests are restricted by the owner-only RLS policies in the migration. Attachment objects remain in the private `myos-private` bucket and are displayed with short-lived signed URLs.
+
+Without these environment variables the app continues in local-only mode. Cloud sync requires the local attachment blob to be present on the device that uploads it; if an attachment is missing locally, MYOS stops that item's cloud save and reports the problem rather than silently dropping the file.
