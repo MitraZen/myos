@@ -9,6 +9,7 @@ export type CaptureType =
   | "Journal"
   | "Book"
   | "Resource"
+  | "Media"
   | "Task"
   | "Person";
 
@@ -40,7 +41,7 @@ export type ProjectStatus = "Idea" | "Planning" | "Active" | "Paused" | "Complet
 const STORAGE_KEY = "myos.captures.v1";
 const captureTypes = new Set<CaptureType>([
   "Capture", "Knowledge", "Idea", "Project", "Decision", "Milestone",
-  "Goal", "Journal", "Book", "Resource", "Task", "Person",
+  "Goal", "Journal", "Book", "Resource", "Media", "Task", "Person",
 ]);
 
 function isCaptureRecord(value: unknown): value is CaptureRecord {

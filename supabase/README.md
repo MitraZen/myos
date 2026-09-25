@@ -6,8 +6,8 @@ This directory contains the cloud schema and setup instructions. The app keeps a
 
 1. Create a new Supabase project for MYOS.
 2. Open **SQL Editor** in the Supabase dashboard.
-3. Paste and run `migrations/20260925000100_myos_core.sql`.
-4. Confirm the migration created the tables and the private `myos-private` Storage bucket.
+3. Paste and run the SQL files in `migrations` in timestamp order. Existing projects should run any newly added migration once.
+4. Confirm the core migration created the tables and the private `myos-private` Storage bucket.
 
 Run this on a clean MYOS project. The migration creates owner-only RLS policies and should be reviewed before applying to a project that already contains application tables or Storage policies.
 
@@ -18,6 +18,7 @@ Run this on a clean MYOS project. The migration creates owner-only RLS policies 
 - `labels` and `capture_labels` store user-owned topics and tags without folders.
 - `capture_attachments` stores file metadata; binary files live in the private Storage bucket.
 - `capture_ai_metadata` separates future AI-generated summaries, topics, entities, and suggestions from original content.
+- `Media` captures represent Web series / Movies and use the common capture model.
 
 Every application table has RLS enabled and owner-scoped policies. Storage object paths are scoped to the authenticated user's ID.
 
