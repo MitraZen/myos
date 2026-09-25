@@ -15,7 +15,7 @@ Open http://localhost:3000.
 
 ## Current build
 
-The current version is an early UI prototype. Captures are held in memory and are not persisted after a page refresh. Supabase authentication, database storage, and AI are not connected yet.
+The current version supports capture creation, search, detail, editing, and deletion. Captures are saved in this browser and survive refreshes, but are not synced or backed up. Supabase authentication, database storage, and AI are not connected yet.
 
 Build the app with:
 
