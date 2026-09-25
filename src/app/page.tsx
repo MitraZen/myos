@@ -142,11 +142,34 @@ export default function Home() {
       setStorageError(error instanceof Error ? `Supabase could not be reached: ${error.message}` : "Supabase could not be reached.");
       setReady(true);
     }).finally(() => { if (!cancelled) setAuthReady(true); });
-    const { data: { subscription } } = client.auth.onAuthStateChange((_event, session) => {
+    const { data: { subscription } } = client.auth.onAuthStateChange((event, session) => {
       if (cancelled) return;
       setUser(session?.user ?? null);
-      if (!session?.user) { setCaptures([]); setReady(true); }
-      else window.location.reload();
+      if (!session?.user) {
+        if (event === "SIGNED_OUT") {
+          setCaptures([]);
+          setLocalImportCount(0);
+          setReady(true);
+        }
+      } else if (event === "SIGNED_IN") {
+        // Let the auth callback release its internal lock before making data requests.
+        window.setTimeout(() => {
+          if (cancelled) return;
+          const local = readLocal();
+          void loadCloudCaptures(session.user.id).then((remote) => {
+            if (cancelled) return;
+            setCaptures(remote);
+            setLocalImportCount(local.filter((item) => !remote.some((cloud) => cloud.id === item.id)).length);
+            setReady(true);
+          }).catch((error: unknown) => {
+            if (cancelled) return;
+            setCaptures(local);
+            setLocalImportCount(local.length);
+            setStorageError(error instanceof Error ? `Supabase could not be reached: ${error.message}` : "Supabase could not be reached.");
+            setReady(true);
+          });
+        }, 0);
+      }
     });
     return () => { cancelled = true; subscription.unsubscribe(); };
   }, []);
