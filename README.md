@@ -15,7 +15,7 @@ Open http://localhost:3000.
 
 ## Current build
 
-The current version supports captures, a personal timeline, project and knowledge links, and image/audio attachments. Capture metadata is stored in `localStorage`; attachment files are stored separately in IndexedDB. Data stays in this browser and is not synced or backed up, so clearing this site's browser data removes it. Supabase authentication, cloud storage, and AI are not connected yet.
+The current version supports captures, a personal timeline, project and knowledge links, and image/audio attachments. Capture metadata is stored in `localStorage`; attachment files are stored separately in IndexedDB. Data stays in this browser and is not synced or backed up, so clearing this site's browser data removes it. Supabase schema foundations are in `supabase/`; authentication, cloud sync, and cloud file storage are not connected yet.
 
 Images are resized to a maximum dimension of 1920 px and recompressed to WebP or JPEG, with a 2 MB limit per image. Uncompressed WAV audio is converted to mono Opus at approximately 64 kbps when the browser supports it; already-compressed audio is retained as provided. A capture can have up to five attachments and 24 MB total.
 
@@ -34,4 +34,4 @@ Import `https://github.com/MitraZen/myos` as a new Vercel project. Vercel should
 - Output directory: automatic
 - Production branch: `main`
 
-No environment variables are required for this prototype. Do not add secrets to the repository.
+No environment variables are required until the Supabase client and authentication phase. Do not add credentials or service-role keys to the repository.
