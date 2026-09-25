@@ -61,7 +61,6 @@ export default function Home() {
   const [ready, setReady] = useState(false);
   const [user, setUser] = useState<User | null>(null);
   const [authReady, setAuthReady] = useState(!supabaseConfigured);
-  const [authEmail, setAuthEmail] = useState("");
   const [authMessage, setAuthMessage] = useState("");
   const [authBusy, setAuthBusy] = useState(false);
   const [localImportCount, setLocalImportCount] = useState(0);
@@ -321,16 +320,20 @@ export default function Home() {
     }
   }
 
-  async function requestMagicLink(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
+  async function signInWithGoogle() {
     if (authBusy) return;
     const client = getSupabase();
-    if (!client || !authEmail.trim()) return;
+    if (!client) return;
     setAuthBusy(true);
     setAuthMessage("");
-    const { error } = await client.auth.signInWithOtp({ email: authEmail.trim(), options: { emailRedirectTo: window.location.origin } });
-    setAuthMessage(error ? error.message : "Check your email for a secure sign-in link.");
-    setAuthBusy(false);
+    const { error } = await client.auth.signInWithOAuth({
+      provider: "google",
+      options: { redirectTo: window.location.origin },
+    });
+    if (error) {
+      setAuthMessage(`Google sign-in could not start: ${error.message}`);
+      setAuthBusy(false);
+    }
   }
 
   async function importLocalCaptures() {
@@ -599,7 +602,7 @@ export default function Home() {
   }
 
   return (
-    supabaseConfigured && authReady && !user ? <main className="auth-shell"><form className="auth-panel" onSubmit={requestMagicLink}><div className="brand auth-brand"><span className="brand-mark">m</span><span>myos<span className="brand-period">.</span></span></div><div className="eyebrow"><span className="eyebrow-line"/> PRIVATE PERSONAL ARCHIVE</div><h1>Sign in to your space.</h1><p>Your captures stay private to your account and sync across your devices.</p><label htmlFor="auth-email">Email address</label><input id="auth-email" type="email" autoComplete="email" required value={authEmail} onChange={(event) => setAuthEmail(event.target.value)} placeholder="you@example.com"/><button className="save-button" type="submit" disabled={authBusy}>{authBusy ? "Sending…" : "Email me a sign-in link"}</button>{authMessage && <p className="auth-message" role="status">{authMessage}</p>}{storageError && <p className="auth-message auth-error" role="alert">{storageError}</p>}<small>Supabase authentication is enabled. Local captures on this device will be offered for import after sign-in.</small></form></main>
+    supabaseConfigured && authReady && !user ? <main className="auth-shell"><section className="auth-panel"><div className="brand auth-brand"><span className="brand-mark">m</span><span>myos<span className="brand-period">.</span></span></div><div className="eyebrow"><span className="eyebrow-line"/> PRIVATE PERSONAL ARCHIVE</div><h1>Sign in to your space.</h1><p>Your captures stay private to your account and sync across your devices.</p><button className="google-signin-button" onClick={() => void signInWithGoogle()} disabled={authBusy}><svg viewBox="0 0 48 48" aria-hidden="true"><path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5Z"/><path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.92c-.58 2.96-2.26 5.48-4.77 7.18l7.73 6C44.39 37.82 46.98 31.68 46.98 24.55Z"/><path fill="#FBBC05" d="M10.53 28.59A14.53 14.53 0 0 1 9.75 24c0-1.59.27-3.13.76-4.59l-7.98-6.19A23.9 23.9 0 0 0 0 24c0 3.87.93 7.54 2.56 10.78l7.97-6.19Z"/><path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.9-5.8l-7.73-6c-2.14 1.44-4.88 2.3-8.17 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48Z"/></svg>{authBusy ? "Connecting…" : "Continue with Google"}</button>{authMessage && <p className="auth-message auth-error" role="alert">{authMessage}</p>}{storageError && <p className="auth-message auth-error" role="alert">{storageError}</p>}<small>After sign-in, MYOS will offer any captures saved on this device for import into your account.</small></section></main>
     : supabaseConfigured && !authReady ? <main className="auth-shell"><p>Connecting securely…</p></main>
     :
     <main className="app-shell">
