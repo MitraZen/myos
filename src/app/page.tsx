@@ -6,6 +6,21 @@ import { CaptureRecord, CaptureType, loadCaptures, storeCaptures } from "@/lib/c
 
 const captureTypes: CaptureType[] = ["Capture", "Knowledge", "Idea", "Project", "Decision", "Milestone", "Goal", "Journal", "Book", "Resource", "Task", "Person"];
 const navigation = ["Home", "Timeline", "Knowledge", "Projects", "Decisions", "Milestones", "Ideas"];
+type TimelineView = "year" | "month" | "day";
+
+function localDateValue(date: Date): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function timelineRangeLabel(value: string, view: TimelineView): string {
+  const date = new Date(`${value}T12:00:00`);
+  if (view === "year") return new Intl.DateTimeFormat(undefined, { year: "numeric" }).format(date);
+  if (view === "month") return new Intl.DateTimeFormat(undefined, { month: "long", year: "numeric" }).format(date);
+  return new Intl.DateTimeFormat(undefined, { weekday: "long", month: "long", day: "numeric", year: "numeric" }).format(date);
+}
 const icons: Record<string, string> = { Home: "⌂", Timeline: "◷", Knowledge: "▤", Projects: "▱", Decisions: "◇", Milestones: "✳", Ideas: "✧" };
 
 function SearchIcon() {
@@ -38,6 +53,9 @@ export default function Home() {
   const [type, setType] = useState<CaptureType>("Capture");
   const [editingId, setEditingId] = useState<string | null>(null);
   const [selected, setSelected] = useState<CaptureRecord | null>(null);
+  const [timelineView, setTimelineView] = useState<TimelineView>("month");
+  const [timelineDate, setTimelineDate] = useState("");
+  const [timelineType, setTimelineType] = useState("All types");
   const editor = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
@@ -88,6 +106,58 @@ export default function Home() {
       return matchesQuery && matchesSection;
     })
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt)), [captures, query, active]);
+
+  const timelineCaptures = useMemo(() => {
+    if (active !== "Timeline") return visibleCaptures;
+    const selectedDate = timelineDate || localDateValue(new Date());
+    const [year, month] = selectedDate.split("-").map(Number);
+    return visibleCaptures.filter((item) => {
+      const date = new Date(item.createdAt);
+      const dateMatches = timelineView === "year" ? date.getFullYear() === year
+        : timelineView === "month" ? date.getFullYear() === year && date.getMonth() + 1 === month
+        : localDateValue(date) === selectedDate;
+      return dateMatches && (timelineType === "All types" || item.type === timelineType);
+    });
+  }, [active, timelineDate, timelineType, timelineView, visibleCaptures]);
+
+  const captureGroups = useMemo(() => {
+    const items = active === "Timeline" ? timelineCaptures : visibleCaptures;
+    const groups = new Map<string, CaptureRecord[]>();
+    for (const item of items) {
+      const localDate = localDateValue(new Date(item.createdAt));
+      const key = active !== "Timeline" ? "recent" : timelineView === "year" ? localDate.slice(0, 7) : localDate;
+      groups.set(key, [...(groups.get(key) ?? []), item]);
+    }
+    return [...groups.entries()].map(([key, captures]) => {
+      const date = new Date(`${key.length === 7 ? `${key}-01` : key}T12:00:00`);
+      const label = active !== "Timeline" ? "" : timelineView === "year"
+        ? new Intl.DateTimeFormat(undefined, { month: "long", year: "numeric" }).format(date)
+        : new Intl.DateTimeFormat(undefined, { weekday: "long", month: "long", day: "numeric" }).format(date);
+      return { key, label, captures };
+    });
+  }, [active, timelineCaptures, timelineView, visibleCaptures]);
+
+  function showTimeline() {
+    setTimelineDate((current) => current || localDateValue(new Date()));
+    setActive("Timeline");
+    setQuery("");
+  }
+
+  function moveTimeline(direction: -1 | 1) {
+    const selectedDate = timelineDate || localDateValue(new Date());
+    const date = new Date(`${selectedDate}T12:00:00`);
+    if (timelineView === "year" || timelineView === "month") {
+      const day = date.getDate();
+      date.setDate(1);
+      if (timelineView === "year") date.setFullYear(date.getFullYear() + direction);
+      else date.setMonth(date.getMonth() + direction);
+      const lastDay = new Date(date.getFullYear(), date.getMonth() + 1, 0).getDate();
+      date.setDate(Math.min(day, lastDay));
+    } else {
+      date.setDate(date.getDate() + direction);
+    }
+    setTimelineDate(localDateValue(date));
+  }
 
   function isTyping(target: EventTarget | null) {
     return target instanceof HTMLElement && (target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName));
@@ -192,7 +262,7 @@ export default function Home() {
         <a className="brand" href="#home" onClick={() => setActive("Home")}><span className="brand-mark">m</span><span>myos<span className="brand-period">.</span></span></a>
         <button className="capture-button" onClick={() => openNewCapture()}><span className="plus">＋</span> Capture <span className="capture-shortcut">N</span></button>
         <div className="nav-label">WORKSPACE</div>
-        <nav className="primary-nav" aria-label="Primary navigation">{navigation.map((item) => <button key={item} className={`nav-item ${active === item ? "selected" : ""}`} onClick={() => { setActive(item); setQuery(""); }}><span className="nav-icon">{icons[item]}</span>{item}{item === "Knowledge" && <span className="nav-count">{captures.filter((capture) => capture.type === "Knowledge").length}</span>}</button>)}</nav>
+        <nav className="primary-nav" aria-label="Primary navigation">{navigation.map((item) => <button key={item} className={`nav-item ${active === item ? "selected" : ""}`} onClick={() => { if (item === "Timeline") { showTimeline(); return; } setActive(item); setQuery(""); }}><span className="nav-icon">{icons[item]}</span>{item}{item === "Knowledge" && <span className="nav-count">{captures.filter((capture) => capture.type === "Knowledge").length}</span>}</button>)}</nav>
         <button className={`nav-item search-nav ${active === "Search" ? "selected" : ""}`} onClick={() => { setCommandQuery(""); setActive("Search"); setQuery(""); document.getElementById("global-search")?.focus(); }}><span className="nav-icon"><SearchIcon /></span>Search<span className="search-shortcut">⌘ K</span></button>
         <div className="sidebar-bottom"><div className="privacy-note"><span className="privacy-dot"/><span>Saved on this device<br/><small>Not synced or backed up.</small></span></div><div className="profile-button"><span className="avatar">m</span><span className="profile-name">My workspace<small>Local storage</small></span></div></div>
       </aside>
@@ -204,12 +274,12 @@ export default function Home() {
 
           <section className="search-panel" aria-label="Search your personal knowledge"><div className="search-leading"><SearchIcon /></div><input id="global-search" aria-label="Search everything" value={query} onChange={(event) => { setQuery(event.target.value); if (event.target.value) setActive("Search"); }} placeholder="Search anything you have saved…"/><button className="search-key" onClick={() => { setCommandQuery(""); setCommandOpen(true); }}>⌘ K</button><span className="search-divider"/><span className="filter-button" aria-hidden="true">⌕</span></section>
 
-          <div className="section-heading"><div><div className="section-kicker">{ready ? `${captures.length} SAVED ${captures.length === 1 ? "ITEM" : "ITEMS"}` : "LOADING YOUR SPACE"}</div><h2>{query ? "Search results" : active === "Timeline" ? "Your timeline" : active === "Home" ? "Recent captures" : active}</h2></div><button className="date-link" onClick={() => { setActive("Timeline"); setQuery(""); }}>Timeline <span>→</span></button></div>
+          <div className="section-heading"><div><div className="section-kicker">{active === "Timeline" ? "PERSONAL HISTORY" : ready ? `${captures.length} SAVED ${captures.length === 1 ? "ITEM" : "ITEMS"}` : "LOADING YOUR SPACE"}</div><h2>{query ? "Search results" : active === "Timeline" ? timelineRangeLabel(timelineDate || localDateValue(new Date()), timelineView) : active === "Home" ? "Recent captures" : active}</h2></div>{active === "Timeline" ? <div className="timeline-controls"><button className="timeline-nav-button" aria-label="Previous period" onClick={() => moveTimeline(-1)}>‹</button><input aria-label="Jump to date" type="date" value={timelineDate || localDateValue(new Date())} onChange={(event) => setTimelineDate(event.target.value)}/><button className="timeline-nav-button" aria-label="Next period" onClick={() => moveTimeline(1)}>›</button><select aria-label="Timeline view" value={timelineView} onChange={(event) => setTimelineView(event.target.value as TimelineView)}><option value="year">Year</option><option value="month">Month</option><option value="day">Day</option></select><select aria-label="Filter captures by type" value={timelineType} onChange={(event) => setTimelineType(event.target.value)}><option>All types</option>{captureTypes.map((captureType) => <option key={captureType}>{captureType}</option>)}</select><button className="timeline-today" onClick={() => setTimelineDate(localDateValue(new Date()))}>Today</button></div> : <button className="date-link" onClick={showTimeline}>Timeline <span>→</span></button>}</div>
 
           {storageError && <p className="storage-alert" role="status">{storageError}</p>}
-          <div className="content-grid"><section className="activity-column"><div className="timeline-day"><div className="timeline-date"><span className="timeline-day-num">⌂</span><span>LOCAL<br/>LIBRARY</span></div><div className="timeline-rule"/><div className="day-activity"><span className="activity-pip"/><span>{visibleCaptures.length ? `${visibleCaptures.length} ${visibleCaptures.length === 1 ? "capture" : "captures"}` : ready ? "Your library is quiet" : "Loading"}</span></div></div>
-            {visibleCaptures.length ? <div className="capture-list">{visibleCaptures.map((item) => <article className="capture-row" key={item.id}><div className={`type-marker marker-${item.type.toLowerCase()}`}>{item.type === "Knowledge" ? "▤" : item.type === "Decision" ? "◇" : item.type === "Idea" ? "✧" : item.type === "Project" ? "▱" : "·"}</div><button type="button" className="capture-body capture-open-button" aria-label={`Open ${item.title}`} onClick={() => setSelected(item)}><div className="capture-meta"><span className={`type-label label-${item.type.toLowerCase()}`}>{item.type}</span><span className="meta-dot">·</span><span>{dateLabel(item.createdAt)}</span>{item.updatedAt !== item.createdAt && <span className="edited-label">Edited</span>}</div><h3>{item.title}</h3><p>{item.content || "No additional content."}</p></button><button className="more-button" aria-label={`Open ${item.title}`} onClick={(event) => { event.stopPropagation(); setSelected(item); }}>···</button></article>)}</div> : <div className="empty-state"><span className="empty-icon">⌕</span><h3>{ready ? query ? "No matches yet" : "Nothing captured yet" : "Loading your captures…"}</h3><p>{ready ? query ? "Try another search, or capture a thought to start building your library." : "Save the thought first. Add context whenever you are ready." : ""}</p>{ready && !query && <button onClick={() => openNewCapture()}>＋ Capture something</button>}</div>}
-            <button className="see-all" onClick={() => { setActive("Timeline"); setQuery(""); }}>View timeline <span>→</span></button>
+          <div className="content-grid"><section className="activity-column"><div className="timeline-day"><div className="timeline-date"><span className="timeline-day-num">⌂</span><span>LOCAL<br/>LIBRARY</span></div><div className="timeline-rule"/><div className="day-activity"><span className="activity-pip"/><span>{timelineCaptures.length ? `${timelineCaptures.length} ${timelineCaptures.length === 1 ? "capture" : "captures"}` : ready ? "Your library is quiet" : "Loading"}</span></div></div>
+            {timelineCaptures.length ? <div className="capture-list">{captureGroups.map((group) => <section className="capture-group" key={group.key}>{group.label && <h3 className="timeline-group-title">{group.label}</h3>}{group.captures.map((item) => <article className="capture-row" key={item.id}><div className={`type-marker marker-${item.type.toLowerCase()}`}>{item.type === "Knowledge" ? "▤" : item.type === "Decision" ? "◇" : item.type === "Idea" ? "✧" : item.type === "Project" ? "▱" : "·"}</div><button type="button" className="capture-body capture-open-button" aria-label={`Open ${item.title}`} onClick={() => setSelected(item)}><div className="capture-meta"><span className={`type-label label-${item.type.toLowerCase()}`}>{item.type}</span><span className="meta-dot">·</span><span>{dateLabel(item.createdAt)}</span>{item.updatedAt !== item.createdAt && <span className="edited-label">Edited</span>}</div><h3>{item.title}</h3><p>{item.content || "No additional content."}</p></button><button className="more-button" aria-label={`Open ${item.title}`} onClick={(event) => { event.stopPropagation(); setSelected(item); }}>···</button></article>)}</section>)}</div> : <div className="empty-state"><span className="empty-icon">⌕</span><h3>{ready ? query ? "No matches yet" : active === "Timeline" ? "No captures in this period" : "Nothing captured yet" : "Loading your captures…"}</h3><p>{ready ? query ? "Try another search, or capture a thought to start building your library." : active === "Timeline" ? "Choose another date or time range, or capture a thought to start your history." : "Save the thought first. Add context whenever you are ready." : ""}</p>{ready && <button onClick={() => openNewCapture()}>＋ Capture something</button>}</div>}
+            {active !== "Timeline" && <button className="see-all" onClick={showTimeline}>View timeline <span>→</span></button>}
           </section>
 
           <aside className="right-rail"><section className="rail-section focus-section"><div className="rail-heading"><span className="rail-icon focus-icon">✳</span><div><span className="rail-kicker">CAPTURE FIRST</span><h3>Make it easy to begin</h3></div></div><div className="rail-note"><p>Write what matters. A title and type are optional; you can organize things later.</p><button className="text-action" onClick={() => openNewCapture()}>Capture a thought <span>→</span></button></div></section>
