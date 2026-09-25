@@ -23,6 +23,14 @@ export type CaptureRecord = {
   projectIds?: string[];
   relatedIds?: string[];
   projectStatus?: ProjectStatus;
+  attachments?: CaptureAttachment[];
+};
+
+export type CaptureAttachment = {
+  id: string;
+  name: string;
+  mimeType: string;
+  size: number;
 };
 
 export type ProjectStatus = "Idea" | "Planning" | "Active" | "Paused" | "Completed" | "Cancelled" | "Archived";
@@ -45,7 +53,14 @@ function isCaptureRecord(value: unknown): value is CaptureRecord {
     && typeof record.updatedAt === "string"
     && (record.projectIds === undefined || (Array.isArray(record.projectIds) && record.projectIds.every((id) => typeof id === "string")))
     && (record.relatedIds === undefined || (Array.isArray(record.relatedIds) && record.relatedIds.every((id) => typeof id === "string")))
-    && (record.projectStatus === undefined || ["Idea", "Planning", "Active", "Paused", "Completed", "Cancelled", "Archived"].includes(record.projectStatus as string));
+    && (record.projectStatus === undefined || ["Idea", "Planning", "Active", "Paused", "Completed", "Cancelled", "Archived"].includes(record.projectStatus as string))
+    && (record.attachments === undefined || (Array.isArray(record.attachments) && record.attachments.length <= 5 && record.attachments.every((attachment) => {
+      if (!attachment || typeof attachment !== "object") return false;
+      const file = attachment as Record<string, unknown>;
+      return typeof file.id === "string" && typeof file.name === "string" && typeof file.mimeType === "string"
+        && (file.mimeType.startsWith("image/") || file.mimeType.startsWith("audio/"))
+        && typeof file.size === "number" && Number.isFinite(file.size) && file.size >= 0 && file.size <= 24 * 1024 * 1024;
+    }) && record.attachments.reduce((sum, attachment) => sum + (attachment as CaptureAttachment).size, 0) <= 24 * 1024 * 1024));
 }
 
 export function loadCaptures(): CaptureRecord[] {

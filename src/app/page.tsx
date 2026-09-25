@@ -1,13 +1,24 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import Image from "next/image";
 import type { FormEvent, KeyboardEvent } from "react";
-import { CaptureRecord, CaptureType, loadCaptures, ProjectStatus, storeCaptures } from "@/lib/capture-storage";
+import { CaptureAttachment, CaptureRecord, CaptureType, loadCaptures, ProjectStatus, storeCaptures } from "@/lib/capture-storage";
+import { loadAttachment, removeAttachment, storeAttachment } from "@/lib/attachment-storage";
+import { normalizeMedia } from "@/lib/media-normalizer";
 
 const captureTypes: CaptureType[] = ["Capture", "Knowledge", "Idea", "Project", "Decision", "Milestone", "Goal", "Journal", "Book", "Resource", "Task", "Person"];
 const navigation = ["Home", "Timeline", "Knowledge", "Projects", "Decisions", "Milestones", "Ideas"];
 type TimelineView = "year" | "month" | "day";
 const projectStatuses: ProjectStatus[] = ["Idea", "Planning", "Active", "Paused", "Completed", "Cancelled", "Archived"];
+const MAX_CAPTURE_ATTACHMENTS = 5;
+const MAX_CAPTURE_ATTACHMENT_BYTES = 24 * 1024 * 1024;
+
+type AttachmentDraft = { attachment: CaptureAttachment; blob: Blob; previewUrl: string };
+
+function formatBytes(bytes: number): string {
+  return bytes < 1024 * 1024 ? `${Math.max(1, Math.round(bytes / 1024))} KB` : `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
 
 function localDateValue(date: Date): string {
   const year = date.getFullYear();
@@ -55,12 +66,19 @@ export default function Home() {
   const [projectStatus, setProjectStatus] = useState<ProjectStatus>("Active");
   const [projectIds, setProjectIds] = useState<string[]>([]);
   const [relatedIds, setRelatedIds] = useState<string[]>([]);
+  const [existingAttachments, setExistingAttachments] = useState<CaptureAttachment[]>([]);
+  const [newAttachments, setNewAttachments] = useState<AttachmentDraft[]>([]);
+  const [attachmentUrls, setAttachmentUrls] = useState<Record<string, string>>({});
+  const [attachmentError, setAttachmentError] = useState("");
+  const [processingMedia, setProcessingMedia] = useState(false);
+  const [savingCapture, setSavingCapture] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [selected, setSelected] = useState<CaptureRecord | null>(null);
   const [timelineView, setTimelineView] = useState<TimelineView>("month");
   const [timelineDate, setTimelineDate] = useState("");
   const [timelineType, setTimelineType] = useState("All types");
   const editor = useRef<HTMLTextAreaElement>(null);
+  const attachmentInput = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     try {
@@ -81,6 +99,27 @@ export default function Home() {
   }, [captureOpen]);
 
   useEffect(() => {
+    if (!selected?.attachments?.length) return;
+    let cancelled = false;
+    const urls: Record<string, string> = {};
+    Promise.all(selected.attachments.map(async (attachment) => {
+      try {
+        const blob = await loadAttachment(attachment.id);
+        if (blob) urls[attachment.id] = URL.createObjectURL(blob);
+      } catch {
+        // A missing local file is surfaced as unavailable in the detail view.
+      }
+    })).then(() => {
+      if (cancelled) Object.values(urls).forEach(URL.revokeObjectURL);
+      else setAttachmentUrls(urls);
+    });
+    return () => {
+      cancelled = true;
+      Object.values(urls).forEach(URL.revokeObjectURL);
+    };
+  }, [selected]);
+
+  useEffect(() => {
     function onKeyDown(event: globalThis.KeyboardEvent) {
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
         event.preventDefault();
@@ -88,7 +127,7 @@ export default function Home() {
       }
       if (event.key === "Escape") {
         setCommandOpen(false);
-        setCaptureOpen(false);
+        discardCapture();
         setSelected(null);
       }
       if (event.key.toLowerCase() === "n" && !event.ctrlKey && !event.metaKey && !isTyping(event.target)) {
@@ -179,14 +218,68 @@ export default function Home() {
     return target instanceof HTMLElement && (target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName));
   }
 
-  function persistCaptures(next: CaptureRecord[]) {
-    if (storageBlocked) return;
-    setCaptures(next);
+  function persistCaptures(next: CaptureRecord[]): boolean {
+    if (storageBlocked) return false;
     try {
       storeCaptures(next);
+      setCaptures(next);
       setStorageError("");
+      return true;
     } catch {
       setStorageError("This browser could not save your latest changes. Copy any new text before closing this page.");
+      return false;
+    }
+  }
+
+  function clearDraftAttachments() {
+    newAttachments.forEach((item) => URL.revokeObjectURL(item.previewUrl));
+    setNewAttachments([]);
+  }
+
+  function discardCapture(force = false) {
+    if (!force && (processingMedia || savingCapture)) return;
+    setCaptureOpen(false);
+    setEditingId(null);
+    setExistingAttachments([]);
+    clearDraftAttachments();
+    setAttachmentError("");
+    setProcessingMedia(false);
+  }
+
+  async function addMedia(files: FileList | null) {
+    if (!files) return;
+    const remaining = MAX_CAPTURE_ATTACHMENTS - existingAttachments.length - newAttachments.length;
+    if (remaining <= 0) {
+      setAttachmentError(`A capture can have up to ${MAX_CAPTURE_ATTACHMENTS} attachments.`);
+      return;
+    }
+    const selectedFiles = Array.from(files).slice(0, remaining);
+    setAttachmentError("");
+    setProcessingMedia(true);
+    let totalBytes = existingAttachments.reduce((sum, item) => sum + item.size, 0)
+      + newAttachments.reduce((sum, item) => sum + item.attachment.size, 0);
+    const processed: AttachmentDraft[] = [];
+    try {
+      for (const file of selectedFiles) {
+        const normalized = await normalizeMedia(file);
+        if (totalBytes + normalized.blob.size > MAX_CAPTURE_ATTACHMENT_BYTES) {
+          setAttachmentError("Attachments on one capture must stay under 24 MB after optimization.");
+          continue;
+        }
+        const attachment: CaptureAttachment = {
+          id: crypto.randomUUID(), name: normalized.name, mimeType: normalized.mimeType, size: normalized.blob.size,
+        };
+        processed.push({ attachment, blob: normalized.blob, previewUrl: URL.createObjectURL(normalized.blob) });
+        totalBytes += normalized.blob.size;
+      }
+      setNewAttachments((current) => [...current, ...processed]);
+      if (files.length > selectedFiles.length) setAttachmentError(`Only ${MAX_CAPTURE_ATTACHMENTS} attachments are allowed per capture.`);
+    } catch (error) {
+      processed.forEach((item) => URL.revokeObjectURL(item.previewUrl));
+      setAttachmentError(error instanceof Error ? error.message : "This file could not be optimized.");
+    } finally {
+      setProcessingMedia(false);
+      if (attachmentInput.current) attachmentInput.current.value = "";
     }
   }
 
@@ -198,6 +291,9 @@ export default function Home() {
     setProjectStatus("Active");
     setProjectIds([]);
     setRelatedIds([]);
+    setExistingAttachments([]);
+    clearDraftAttachments();
+    setAttachmentError("");
     setCaptureOpen(true);
     setSelected(null);
     setCommandOpen(false);
@@ -212,51 +308,83 @@ export default function Home() {
     setProjectIds(capture.projectIds ?? []);
     setRelatedIds(capture.type === "Knowledge" ? captures.filter((item) => item.type === "Knowledge" && item.id !== capture.id
       && ((capture.relatedIds ?? []).includes(item.id) || (item.relatedIds ?? []).includes(capture.id))).map((item) => item.id) : []);
+    setExistingAttachments(capture.attachments ?? []);
+    clearDraftAttachments();
+    setAttachmentError("");
     setSelected(null);
     setCaptureOpen(true);
   }
 
-  function saveCapture(event: FormEvent<HTMLFormElement>) {
+  function removeNewAttachment(id: string) {
+    const item = newAttachments.find((attachment) => attachment.attachment.id === id);
+    if (item) URL.revokeObjectURL(item.previewUrl);
+    setNewAttachments((current) => current.filter((attachment) => attachment.attachment.id !== id));
+  }
+
+  async function saveCapture(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (storageBlocked || (!title.trim() && !content.trim())) return;
-    const cleanTitle = title.trim() || content.trim().split("\n")[0].slice(0, 80) || "Untitled capture";
+    if (savingCapture || processingMedia || storageBlocked || (!title.trim() && !content.trim() && !existingAttachments.length && !newAttachments.length)) return;
+    const cleanTitle = title.trim() || content.trim().split("\n")[0].slice(0, 80) || newAttachments[0]?.attachment.name || existingAttachments[0]?.name || "Untitled capture";
     const now = new Date().toISOString();
-    let next: CaptureRecord[];
-    if (editingId) {
-      next = captures.map((item) => item.id === editingId
-        ? { ...item, title: cleanTitle, content: content.trim(), type, updatedAt: now,
-          projectStatus: type === "Project" ? projectStatus : undefined,
-          projectIds: type === "Project" ? [] : projectIds,
-          relatedIds: type === "Knowledge" ? relatedIds : [] }
-        : item);
-    } else {
-      const capture: CaptureRecord = {
-        id: crypto.randomUUID(),
-        title: cleanTitle,
-        content: content.trim(),
-        type,
-        createdAt: now,
-        updatedAt: now,
-        ...(type === "Project" ? { projectStatus } : { projectIds }),
-        ...(type === "Knowledge" ? { relatedIds } : {}),
-      };
-      next = [capture, ...captures];
+    const storedIds: string[] = [];
+    setSavingCapture(true);
+    setAttachmentError("");
+    try {
+      for (const item of newAttachments) {
+        await storeAttachment(item.attachment.id, item.blob);
+        storedIds.push(item.attachment.id);
+      }
+      const attachmentList = [...existingAttachments, ...newAttachments.map((item) => item.attachment)];
+      let next: CaptureRecord[];
+      if (editingId) {
+        next = captures.map((item) => item.id === editingId
+          ? { ...item, title: cleanTitle, content: content.trim(), type, updatedAt: now,
+            attachments: attachmentList.length ? attachmentList : undefined,
+            projectStatus: type === "Project" ? projectStatus : undefined,
+            projectIds: type === "Project" ? [] : projectIds,
+            relatedIds: type === "Knowledge" ? relatedIds : [] }
+          : item);
+      } else {
+        const capture: CaptureRecord = {
+          id: crypto.randomUUID(),
+          title: cleanTitle,
+          content: content.trim(),
+          type,
+          createdAt: now,
+          updatedAt: now,
+          ...(attachmentList.length ? { attachments: attachmentList } : {}),
+          ...(type === "Project" ? { projectStatus } : { projectIds }),
+          ...(type === "Knowledge" ? { relatedIds } : {}),
+        };
+        next = [capture, ...captures];
+      }
+      if (!persistCaptures(next)) throw new Error("The capture could not be saved. Your existing attachment files were kept.");
+
+      const removedAttachments = editingId
+        ? (captures.find((item) => item.id === editingId)?.attachments ?? []).filter((item) => !attachmentList.some((current) => current.id === item.id))
+        : [];
+      await Promise.allSettled(removedAttachments.map((item) => removeAttachment(item.id)));
+      discardCapture(true);
+      setActive("Home");
+      setQuery("");
+    } catch (error) {
+      await Promise.all(storedIds.map((id) => removeAttachment(id).catch(() => undefined)));
+      setAttachmentError(error instanceof Error ? error.message : "The capture or attachment could not be saved.");
+    } finally {
+      setSavingCapture(false);
     }
-    persistCaptures(next);
-    setCaptureOpen(false);
-    setEditingId(null);
-    setActive("Home");
-    setQuery("");
   }
 
   function deleteCapture(capture: CaptureRecord) {
     if (storageBlocked) return;
     if (!window.confirm(`Delete “${capture.title}”? This cannot be undone.`)) return;
-    persistCaptures(captures.filter((item) => item.id !== capture.id).map((item) => ({
+    const saved = persistCaptures(captures.filter((item) => item.id !== capture.id).map((item) => ({
       ...item,
       projectIds: item.projectIds?.filter((id) => id !== capture.id),
       relatedIds: item.relatedIds?.filter((id) => id !== capture.id),
     })));
+    if (!saved) return;
+    void Promise.all((capture.attachments ?? []).map((item) => removeAttachment(item.id).catch(() => undefined)));
     setSelected(null);
   }
 
@@ -322,13 +450,18 @@ export default function Home() {
         </div>
       </section>
 
-      {captureOpen && <div className="overlay" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setCaptureOpen(false); }}><section className="capture-dialog" role="dialog" aria-modal="true" aria-labelledby="capture-heading"><div className="dialog-top"><div className="dialog-mark">＋</div><button className="dialog-close" aria-label="Close capture" onClick={() => { setCaptureOpen(false); setEditingId(null); }}>×</button></div><div className="dialog-eyebrow">{editingId ? "MAKE AN UPDATE" : "A THOUGHT TO KEEP"}</div><h2 id="capture-heading">{editingId ? "Edit this capture." : "Capture a thought."}</h2><p className="dialog-copy">{editingId ? "Your changes are saved on this device." : "Start with what matters. You can add details later."}</p><form onSubmit={saveCapture}><input className="title-input" aria-label="Capture title" placeholder="Give it a title (optional)" maxLength={160} value={title} onChange={(event) => setTitle(event.target.value)}/><textarea ref={editor} className="capture-editor" aria-label="Capture content" placeholder="What’s on your mind?" value={content} onChange={(event) => setContent(event.target.value)}/>
+      {captureOpen && <div className="overlay" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) discardCapture(); }}><section className="capture-dialog" role="dialog" aria-modal="true" aria-labelledby="capture-heading"><div className="dialog-top"><div className="dialog-mark">＋</div><button className="dialog-close" aria-label="Close capture" disabled={processingMedia || savingCapture} onClick={() => discardCapture()}>×</button></div><div className="dialog-eyebrow">{editingId ? "MAKE AN UPDATE" : "A THOUGHT TO KEEP"}</div><h2 id="capture-heading">{editingId ? "Edit this capture." : "Capture a thought."}</h2><p className="dialog-copy">{editingId ? "Your changes are saved on this device." : "Start with what matters. You can add details later."}</p><form onSubmit={saveCapture}><input className="title-input" aria-label="Capture title" placeholder="Give it a title (optional)" maxLength={160} value={title} onChange={(event) => setTitle(event.target.value)}/><textarea ref={editor} className="capture-editor" aria-label="Capture content" placeholder="What’s on your mind?" value={content} onChange={(event) => setContent(event.target.value)}/>
+        <section className="media-section" aria-label="Capture attachments"><div className="media-section-heading">ATTACHMENTS <span>{existingAttachments.length + newAttachments.length}/{MAX_CAPTURE_ATTACHMENTS}</span></div><input ref={attachmentInput} className="media-input" aria-label="Choose image or audio files" type="file" accept="image/jpeg,image/png,image/webp,audio/*" multiple disabled={processingMedia || savingCapture || existingAttachments.length + newAttachments.length >= MAX_CAPTURE_ATTACHMENTS} onChange={(event) => void addMedia(event.target.files)}/><button className="media-add-button" type="button" disabled={processingMedia || savingCapture || existingAttachments.length + newAttachments.length >= MAX_CAPTURE_ATTACHMENTS} onClick={() => attachmentInput.current?.click()}>＋ Add image or audio</button><p className="media-guidance">Images are resized and compressed. WAV is converted to compact Opus; compressed audio is kept as-is. Up to 5 files and 24 MB per capture.</p>
+          {(existingAttachments.length > 0 || newAttachments.length > 0) && <div className="media-file-list">{existingAttachments.map((item) => <div className="media-file-row" key={item.id}><span className="media-file-kind">{item.mimeType.startsWith("image/") ? "▧" : "♫"}</span><span className="media-file-name">{item.name}<small>{formatBytes(item.size)}</small></span><button type="button" aria-label={`Remove ${item.name}`} disabled={savingCapture || processingMedia} onClick={() => setExistingAttachments((current) => current.filter((attachment) => attachment.id !== item.id))}>×</button></div>)}{newAttachments.map((item) => <div className="media-file-row" key={item.attachment.id}><span className="media-file-kind">{item.attachment.mimeType.startsWith("image/") ? "▧" : "♫"}</span><span className="media-file-name">{item.attachment.name}<small>{formatBytes(item.attachment.size)} · optimized</small></span><button type="button" aria-label={`Remove ${item.attachment.name}`} disabled={savingCapture || processingMedia} onClick={() => removeNewAttachment(item.attachment.id)}>×</button></div>)}</div>}
+          {processingMedia && <p className="media-status" role="status">Optimizing file for storage…</p>}{attachmentError && <p className="media-error" role="alert">{attachmentError}</p>}
+        </section>
         {type === "Project" && <label className="association-select">PROJECT STATUS <select value={projectStatus} onChange={(event) => setProjectStatus(event.target.value as ProjectStatus)}>{projectStatuses.map((status) => <option key={status}>{status}</option>)}</select></label>}
         {type !== "Project" && projects.length > 0 && <fieldset className="association-fieldset"><legend>IN PROJECTS <span>Optional</span></legend><div className="association-options">{projects.filter((project) => project.id !== editingId).map((project) => <label key={project.id}><input type="checkbox" checked={projectIds.includes(project.id)} onChange={(event) => setProjectIds((current) => event.target.checked ? [...current, project.id] : current.filter((id) => id !== project.id))}/><span>{project.title}</span></label>)}</div></fieldset>}
         {type === "Knowledge" && captures.some((item) => item.type === "Knowledge" && item.id !== editingId) && <fieldset className="association-fieldset"><legend>RELATED KNOWLEDGE <span>Optional</span></legend><div className="association-options">{captures.filter((item) => item.type === "Knowledge" && item.id !== editingId).map((item) => <label key={item.id}><input type="checkbox" checked={relatedIds.includes(item.id)} onChange={(event) => setRelatedIds((current) => event.target.checked ? [...current, item.id] : current.filter((id) => id !== item.id))}/><span>{item.title}</span></label>)}</div></fieldset>}
-        <div className="dialog-bottom"><label className="type-select-label">TYPE <select value={type} onChange={(event) => setType(event.target.value as CaptureType)}>{captureTypes.map((option) => <option key={option}>{option}</option>)}</select></label><button className="save-button" type="submit" disabled={storageBlocked || (!title.trim() && !content.trim())}>{editingId ? "Save changes" : "Save capture"} <span>↗</span></button></div></form><div className="local-note">Saved on this device · not synced</div></section></div>}
+        <div className="dialog-bottom"><label className="type-select-label">TYPE <select value={type} onChange={(event) => setType(event.target.value as CaptureType)}>{captureTypes.map((option) => <option key={option}>{option}</option>)}</select></label><button className="save-button" type="submit" disabled={storageBlocked || savingCapture || processingMedia || (!title.trim() && !content.trim() && !existingAttachments.length && !newAttachments.length)}>{savingCapture ? "Saving…" : editingId ? "Save changes" : "Save capture"} <span>↗</span></button></div></form><div className="local-note">Files are optimized and saved on this device · not synced</div></section></div>}
 
       {selected && <div className="overlay" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setSelected(null); }}><section className="detail-dialog" role="dialog" aria-modal="true" aria-labelledby="detail-heading"><div className="dialog-top"><span className={`type-label label-${selected.type.toLowerCase()}`}>{selected.type.toUpperCase()}</span><button className="dialog-close" aria-label="Close details" onClick={() => setSelected(null)}>×</button></div><h2 id="detail-heading">{selected.title}</h2><p className="detail-date">Created {dateLabel(selected.createdAt)}{selected.updatedAt !== selected.createdAt ? ` · Updated ${dateLabel(selected.updatedAt)}` : ""}{selected.type === "Project" ? ` · ${selected.projectStatus ?? "Active"}` : ""}</p><div className="detail-content">{selected.content || <span className="detail-empty">No additional content.</span>}</div>
+        {!!selected.attachments?.length && <section className="detail-attachments"><div className="related-heading">ATTACHMENTS <span>{selected.attachments.length}</span></div>{selected.attachments.map((item) => <div className="detail-attachment" key={item.id}><div className="detail-attachment-name"><strong>{item.name}</strong><span>{formatBytes(item.size)}</span>{attachmentUrls[item.id] && <a href={attachmentUrls[item.id]} download={item.name} aria-label={`Download ${item.name}`}>Download</a>}</div>{attachmentUrls[item.id] ? item.mimeType.startsWith("image/") ? <Image className="detail-image" src={attachmentUrls[item.id]} alt={item.name} width={800} height={600} unoptimized/> : item.mimeType.startsWith("audio/") ? <audio className="detail-audio" controls preload="metadata" src={attachmentUrls[item.id]}/> : null : <p className="related-empty">This file is unavailable in the local attachment store.</p>}</div>)}</section>}
         {selected.type === "Project" && <section className="related-section"><div className="related-heading">PROJECT CONTEXT <span>{linkedToProject(selected.id).length}</span></div>{linkedToProject(selected.id).length ? linkedToProject(selected.id).map((item) => <button className="related-item" key={item.id} onClick={() => setSelected(item)}><span className={`type-label label-${item.type.toLowerCase()}`}>{item.type}</span><strong>{item.title}</strong><span>→</span></button>) : <p className="related-empty">Captures linked to this project will appear here.</p>}</section>}
         {selected.type === "Knowledge" && <section className="related-section"><div className="related-heading">RELATED KNOWLEDGE <span>{relatedKnowledge(selected).length}</span></div>{relatedKnowledge(selected).length ? relatedKnowledge(selected).map((item) => <button className="related-item" key={item.id} onClick={() => setSelected(item)}><span className="type-label label-knowledge">KNOWLEDGE</span><strong>{item.title}</strong><span>→</span></button>) : <p className="related-empty">Connect this to another knowledge entry when it is useful.</p>}</section>}
         {selected.type !== "Project" && (selected.projectIds ?? []).some((id) => projects.some((project) => project.id === id)) && <section className="related-section"><div className="related-heading">IN PROJECTS</div>{projects.filter((project) => (selected.projectIds ?? []).includes(project.id)).map((project) => <button className="related-item" key={project.id} onClick={() => setSelected(project)}><span className="type-label label-project">PROJECT</span><strong>{project.title}</strong><span>→</span></button>)}</section>}
