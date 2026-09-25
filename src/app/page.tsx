@@ -2,11 +2,12 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent, KeyboardEvent } from "react";
-import { CaptureRecord, CaptureType, loadCaptures, storeCaptures } from "@/lib/capture-storage";
+import { CaptureRecord, CaptureType, loadCaptures, ProjectStatus, storeCaptures } from "@/lib/capture-storage";
 
 const captureTypes: CaptureType[] = ["Capture", "Knowledge", "Idea", "Project", "Decision", "Milestone", "Goal", "Journal", "Book", "Resource", "Task", "Person"];
 const navigation = ["Home", "Timeline", "Knowledge", "Projects", "Decisions", "Milestones", "Ideas"];
 type TimelineView = "year" | "month" | "day";
+const projectStatuses: ProjectStatus[] = ["Idea", "Planning", "Active", "Paused", "Completed", "Cancelled", "Archived"];
 
 function localDateValue(date: Date): string {
   const year = date.getFullYear();
@@ -51,6 +52,9 @@ export default function Home() {
   const [title, setTitle] = useState("");
   const [content, setContent] = useState("");
   const [type, setType] = useState<CaptureType>("Capture");
+  const [projectStatus, setProjectStatus] = useState<ProjectStatus>("Active");
+  const [projectIds, setProjectIds] = useState<string[]>([]);
+  const [relatedIds, setRelatedIds] = useState<string[]>([]);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [selected, setSelected] = useState<CaptureRecord | null>(null);
   const [timelineView, setTimelineView] = useState<TimelineView>("month");
@@ -106,6 +110,18 @@ export default function Home() {
       return matchesQuery && matchesSection;
     })
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt)), [captures, query, active]);
+  const projects = useMemo(() => captures.filter((item) => item.type === "Project").sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)), [captures]);
+
+  function linkedToProject(projectId: string) {
+    return captures.filter((item) => item.id !== projectId && (item.projectIds ?? []).includes(projectId))
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  }
+
+  function relatedKnowledge(capture: CaptureRecord) {
+    const ids = new Set(capture.relatedIds ?? []);
+    return captures.filter((item) => item.type === "Knowledge" && item.id !== capture.id
+      && (ids.has(item.id) || (item.relatedIds ?? []).includes(capture.id)));
+  }
 
   const timelineCaptures = useMemo(() => {
     if (active !== "Timeline") return visibleCaptures;
@@ -179,6 +195,9 @@ export default function Home() {
     setTitle("");
     setContent("");
     setType(nextType);
+    setProjectStatus("Active");
+    setProjectIds([]);
+    setRelatedIds([]);
     setCaptureOpen(true);
     setSelected(null);
     setCommandOpen(false);
@@ -189,6 +208,10 @@ export default function Home() {
     setTitle(capture.title);
     setContent(capture.content);
     setType(capture.type);
+    setProjectStatus(capture.projectStatus ?? "Active");
+    setProjectIds(capture.projectIds ?? []);
+    setRelatedIds(capture.type === "Knowledge" ? captures.filter((item) => item.type === "Knowledge" && item.id !== capture.id
+      && ((capture.relatedIds ?? []).includes(item.id) || (item.relatedIds ?? []).includes(capture.id))).map((item) => item.id) : []);
     setSelected(null);
     setCaptureOpen(true);
   }
@@ -201,7 +224,10 @@ export default function Home() {
     let next: CaptureRecord[];
     if (editingId) {
       next = captures.map((item) => item.id === editingId
-        ? { ...item, title: cleanTitle, content: content.trim(), type, updatedAt: now }
+        ? { ...item, title: cleanTitle, content: content.trim(), type, updatedAt: now,
+          projectStatus: type === "Project" ? projectStatus : undefined,
+          projectIds: type === "Project" ? [] : projectIds,
+          relatedIds: type === "Knowledge" ? relatedIds : [] }
         : item);
     } else {
       const capture: CaptureRecord = {
@@ -211,6 +237,8 @@ export default function Home() {
         type,
         createdAt: now,
         updatedAt: now,
+        ...(type === "Project" ? { projectStatus } : { projectIds }),
+        ...(type === "Knowledge" ? { relatedIds } : {}),
       };
       next = [capture, ...captures];
     }
@@ -224,7 +252,11 @@ export default function Home() {
   function deleteCapture(capture: CaptureRecord) {
     if (storageBlocked) return;
     if (!window.confirm(`Delete “${capture.title}”? This cannot be undone.`)) return;
-    persistCaptures(captures.filter((item) => item.id !== capture.id));
+    persistCaptures(captures.filter((item) => item.id !== capture.id).map((item) => ({
+      ...item,
+      projectIds: item.projectIds?.filter((id) => id !== capture.id),
+      relatedIds: item.relatedIds?.filter((id) => id !== capture.id),
+    })));
     setSelected(null);
   }
 
@@ -274,11 +306,11 @@ export default function Home() {
 
           <section className="search-panel" aria-label="Search your personal knowledge"><div className="search-leading"><SearchIcon /></div><input id="global-search" aria-label="Search everything" value={query} onChange={(event) => { setQuery(event.target.value); if (event.target.value) setActive("Search"); }} placeholder="Search anything you have saved…"/><button className="search-key" onClick={() => { setCommandQuery(""); setCommandOpen(true); }}>⌘ K</button><span className="search-divider"/><span className="filter-button" aria-hidden="true">⌕</span></section>
 
-          <div className="section-heading"><div><div className="section-kicker">{active === "Timeline" ? "PERSONAL HISTORY" : ready ? `${captures.length} SAVED ${captures.length === 1 ? "ITEM" : "ITEMS"}` : "LOADING YOUR SPACE"}</div><h2>{query ? "Search results" : active === "Timeline" ? timelineRangeLabel(timelineDate || localDateValue(new Date()), timelineView) : active === "Home" ? "Recent captures" : active}</h2></div>{active === "Timeline" ? <div className="timeline-controls"><button className="timeline-nav-button" aria-label="Previous period" onClick={() => moveTimeline(-1)}>‹</button><input aria-label="Jump to date" type="date" value={timelineDate || localDateValue(new Date())} onChange={(event) => setTimelineDate(event.target.value)}/><button className="timeline-nav-button" aria-label="Next period" onClick={() => moveTimeline(1)}>›</button><select aria-label="Timeline view" value={timelineView} onChange={(event) => setTimelineView(event.target.value as TimelineView)}><option value="year">Year</option><option value="month">Month</option><option value="day">Day</option></select><select aria-label="Filter captures by type" value={timelineType} onChange={(event) => setTimelineType(event.target.value)}><option>All types</option>{captureTypes.map((captureType) => <option key={captureType}>{captureType}</option>)}</select><button className="timeline-today" onClick={() => setTimelineDate(localDateValue(new Date()))}>Today</button></div> : <button className="date-link" onClick={showTimeline}>Timeline <span>→</span></button>}</div>
+          <div className="section-heading"><div><div className="section-kicker">{active === "Timeline" ? "PERSONAL HISTORY" : ready ? `${captures.length} SAVED ${captures.length === 1 ? "ITEM" : "ITEMS"}` : "LOADING YOUR SPACE"}</div><h2>{query ? "Search results" : active === "Timeline" ? timelineRangeLabel(timelineDate || localDateValue(new Date()), timelineView) : active === "Home" ? "Recent captures" : active}</h2></div>{active === "Timeline" ? <div className="timeline-controls"><button className="timeline-nav-button" aria-label="Previous period" onClick={() => moveTimeline(-1)}>‹</button><input aria-label="Jump to date" type="date" value={timelineDate || localDateValue(new Date())} onChange={(event) => setTimelineDate(event.target.value)}/><button className="timeline-nav-button" aria-label="Next period" onClick={() => moveTimeline(1)}>›</button><select aria-label="Timeline view" value={timelineView} onChange={(event) => setTimelineView(event.target.value as TimelineView)}><option value="year">Year</option><option value="month">Month</option><option value="day">Day</option></select><select aria-label="Filter captures by type" value={timelineType} onChange={(event) => setTimelineType(event.target.value)}><option>All types</option>{captureTypes.map((captureType) => <option key={captureType}>{captureType}</option>)}</select><button className="timeline-today" onClick={() => setTimelineDate(localDateValue(new Date()))}>Today</button></div> : active === "Projects" ? <button className="date-link" onClick={() => openNewCapture("Project")}>＋ New project</button> : <button className="date-link" onClick={showTimeline}>Timeline <span>→</span></button>}</div>
 
           {storageError && <p className="storage-alert" role="status">{storageError}</p>}
           <div className="content-grid"><section className="activity-column"><div className="timeline-day"><div className="timeline-date"><span className="timeline-day-num">⌂</span><span>LOCAL<br/>LIBRARY</span></div><div className="timeline-rule"/><div className="day-activity"><span className="activity-pip"/><span>{timelineCaptures.length ? `${timelineCaptures.length} ${timelineCaptures.length === 1 ? "capture" : "captures"}` : ready ? "Your library is quiet" : "Loading"}</span></div></div>
-            {timelineCaptures.length ? <div className="capture-list">{captureGroups.map((group) => <section className="capture-group" key={group.key}>{group.label && <h3 className="timeline-group-title">{group.label}</h3>}{group.captures.map((item) => <article className="capture-row" key={item.id}><div className={`type-marker marker-${item.type.toLowerCase()}`}>{item.type === "Knowledge" ? "▤" : item.type === "Decision" ? "◇" : item.type === "Idea" ? "✧" : item.type === "Project" ? "▱" : "·"}</div><button type="button" className="capture-body capture-open-button" aria-label={`Open ${item.title}`} onClick={() => setSelected(item)}><div className="capture-meta"><span className={`type-label label-${item.type.toLowerCase()}`}>{item.type}</span><span className="meta-dot">·</span><span>{dateLabel(item.createdAt)}</span>{item.updatedAt !== item.createdAt && <span className="edited-label">Edited</span>}</div><h3>{item.title}</h3><p>{item.content || "No additional content."}</p></button><button className="more-button" aria-label={`Open ${item.title}`} onClick={(event) => { event.stopPropagation(); setSelected(item); }}>···</button></article>)}</section>)}</div> : <div className="empty-state"><span className="empty-icon">⌕</span><h3>{ready ? query ? "No matches yet" : active === "Timeline" ? "No captures in this period" : "Nothing captured yet" : "Loading your captures…"}</h3><p>{ready ? query ? "Try another search, or capture a thought to start building your library." : active === "Timeline" ? "Choose another date or time range, or capture a thought to start your history." : "Save the thought first. Add context whenever you are ready." : ""}</p>{ready && <button onClick={() => openNewCapture()}>＋ Capture something</button>}</div>}
+            {active === "Projects" ? <div className="project-list">{projects.map((project) => <button type="button" className="project-list-row" key={project.id} onClick={() => setSelected(project)}><span className="project-list-symbol">▱</span><span className="project-list-copy"><strong>{project.title}</strong><small>{project.content || "No description yet."}</small></span><span className={`project-status status-${(project.projectStatus ?? "Active").toLowerCase()}`}>{project.projectStatus ?? "Active"}</span><span className="project-related-count">{linkedToProject(project.id).length} linked</span><span className="project-list-arrow">→</span></button>)}{projects.length === 0 && <div className="empty-state"><span className="empty-icon">▱</span><h3>{ready ? "Start a project" : "Loading your projects…"}</h3><p>Give an active effort a home. Related captures and knowledge can be linked as you go.</p><button onClick={() => openNewCapture("Project")}>＋ Create a project</button></div>}</div> : timelineCaptures.length ? <div className="capture-list">{captureGroups.map((group) => <section className="capture-group" key={group.key}>{group.label && <h3 className="timeline-group-title">{group.label}</h3>}{group.captures.map((item) => <article className="capture-row" key={item.id}><div className={`type-marker marker-${item.type.toLowerCase()}`}>{item.type === "Knowledge" ? "▤" : item.type === "Decision" ? "◇" : item.type === "Idea" ? "✧" : item.type === "Project" ? "▱" : "·"}</div><button type="button" className="capture-body capture-open-button" aria-label={`Open ${item.title}`} onClick={() => setSelected(item)}><div className="capture-meta"><span className={`type-label label-${item.type.toLowerCase()}`}>{item.type}</span><span className="meta-dot">·</span><span>{dateLabel(item.createdAt)}</span>{item.updatedAt !== item.createdAt && <span className="edited-label">Edited</span>}</div><h3>{item.title}</h3><p>{item.content || "No additional content."}</p></button><button className="more-button" aria-label={`Open ${item.title}`} onClick={(event) => { event.stopPropagation(); setSelected(item); }}>···</button></article>)}</section>)}</div> : <div className="empty-state"><span className="empty-icon">⌕</span><h3>{ready ? query ? "No matches yet" : active === "Timeline" ? "No captures in this period" : "Nothing captured yet" : "Loading your captures…"}</h3><p>{ready ? query ? "Try another search, or capture a thought to start building your library." : active === "Timeline" ? "Choose another date or time range, or capture a thought to start your history." : "Save the thought first. Add context whenever you are ready." : ""}</p>{ready && <button onClick={() => openNewCapture()}>＋ Capture something</button>}</div>}
             {active !== "Timeline" && <button className="see-all" onClick={showTimeline}>View timeline <span>→</span></button>}
           </section>
 
@@ -290,9 +322,17 @@ export default function Home() {
         </div>
       </section>
 
-      {captureOpen && <div className="overlay" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setCaptureOpen(false); }}><section className="capture-dialog" role="dialog" aria-modal="true" aria-labelledby="capture-heading"><div className="dialog-top"><div className="dialog-mark">＋</div><button className="dialog-close" aria-label="Close capture" onClick={() => { setCaptureOpen(false); setEditingId(null); }}>×</button></div><div className="dialog-eyebrow">{editingId ? "MAKE AN UPDATE" : "A THOUGHT TO KEEP"}</div><h2 id="capture-heading">{editingId ? "Edit this capture." : "Capture a thought."}</h2><p className="dialog-copy">{editingId ? "Your changes are saved on this device." : "Start with what matters. You can add details later."}</p><form onSubmit={saveCapture}><input className="title-input" aria-label="Capture title" placeholder="Give it a title (optional)" maxLength={160} value={title} onChange={(event) => setTitle(event.target.value)}/><textarea ref={editor} className="capture-editor" aria-label="Capture content" placeholder="What’s on your mind?" value={content} onChange={(event) => setContent(event.target.value)}/><div className="dialog-bottom"><label className="type-select-label">TYPE <select value={type} onChange={(event) => setType(event.target.value as CaptureType)}>{captureTypes.map((option) => <option key={option}>{option}</option>)}</select></label><button className="save-button" type="submit" disabled={storageBlocked || (!title.trim() && !content.trim())}>{editingId ? "Save changes" : "Save capture"} <span>↗</span></button></div></form><div className="local-note">Saved on this device · not synced</div></section></div>}
+      {captureOpen && <div className="overlay" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setCaptureOpen(false); }}><section className="capture-dialog" role="dialog" aria-modal="true" aria-labelledby="capture-heading"><div className="dialog-top"><div className="dialog-mark">＋</div><button className="dialog-close" aria-label="Close capture" onClick={() => { setCaptureOpen(false); setEditingId(null); }}>×</button></div><div className="dialog-eyebrow">{editingId ? "MAKE AN UPDATE" : "A THOUGHT TO KEEP"}</div><h2 id="capture-heading">{editingId ? "Edit this capture." : "Capture a thought."}</h2><p className="dialog-copy">{editingId ? "Your changes are saved on this device." : "Start with what matters. You can add details later."}</p><form onSubmit={saveCapture}><input className="title-input" aria-label="Capture title" placeholder="Give it a title (optional)" maxLength={160} value={title} onChange={(event) => setTitle(event.target.value)}/><textarea ref={editor} className="capture-editor" aria-label="Capture content" placeholder="What’s on your mind?" value={content} onChange={(event) => setContent(event.target.value)}/>
+        {type === "Project" && <label className="association-select">PROJECT STATUS <select value={projectStatus} onChange={(event) => setProjectStatus(event.target.value as ProjectStatus)}>{projectStatuses.map((status) => <option key={status}>{status}</option>)}</select></label>}
+        {type !== "Project" && projects.length > 0 && <fieldset className="association-fieldset"><legend>IN PROJECTS <span>Optional</span></legend><div className="association-options">{projects.filter((project) => project.id !== editingId).map((project) => <label key={project.id}><input type="checkbox" checked={projectIds.includes(project.id)} onChange={(event) => setProjectIds((current) => event.target.checked ? [...current, project.id] : current.filter((id) => id !== project.id))}/><span>{project.title}</span></label>)}</div></fieldset>}
+        {type === "Knowledge" && captures.some((item) => item.type === "Knowledge" && item.id !== editingId) && <fieldset className="association-fieldset"><legend>RELATED KNOWLEDGE <span>Optional</span></legend><div className="association-options">{captures.filter((item) => item.type === "Knowledge" && item.id !== editingId).map((item) => <label key={item.id}><input type="checkbox" checked={relatedIds.includes(item.id)} onChange={(event) => setRelatedIds((current) => event.target.checked ? [...current, item.id] : current.filter((id) => id !== item.id))}/><span>{item.title}</span></label>)}</div></fieldset>}
+        <div className="dialog-bottom"><label className="type-select-label">TYPE <select value={type} onChange={(event) => setType(event.target.value as CaptureType)}>{captureTypes.map((option) => <option key={option}>{option}</option>)}</select></label><button className="save-button" type="submit" disabled={storageBlocked || (!title.trim() && !content.trim())}>{editingId ? "Save changes" : "Save capture"} <span>↗</span></button></div></form><div className="local-note">Saved on this device · not synced</div></section></div>}
 
-      {selected && <div className="overlay" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setSelected(null); }}><section className="detail-dialog" role="dialog" aria-modal="true" aria-labelledby="detail-heading"><div className="dialog-top"><span className={`type-label label-${selected.type.toLowerCase()}`}>{selected.type.toUpperCase()}</span><button className="dialog-close" aria-label="Close details" onClick={() => setSelected(null)}>×</button></div><h2 id="detail-heading">{selected.title}</h2><p className="detail-date">Created {dateLabel(selected.createdAt)}{selected.updatedAt !== selected.createdAt ? ` · Updated ${dateLabel(selected.updatedAt)}` : ""}</p><div className="detail-content">{selected.content || <span className="detail-empty">No additional content.</span>}</div><div className="detail-actions"><button className="delete-button" disabled={storageBlocked} onClick={() => deleteCapture(selected)}>Delete</button><button className="save-button" onClick={() => editCapture(selected)}>Edit capture</button></div></section></div>}
+      {selected && <div className="overlay" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setSelected(null); }}><section className="detail-dialog" role="dialog" aria-modal="true" aria-labelledby="detail-heading"><div className="dialog-top"><span className={`type-label label-${selected.type.toLowerCase()}`}>{selected.type.toUpperCase()}</span><button className="dialog-close" aria-label="Close details" onClick={() => setSelected(null)}>×</button></div><h2 id="detail-heading">{selected.title}</h2><p className="detail-date">Created {dateLabel(selected.createdAt)}{selected.updatedAt !== selected.createdAt ? ` · Updated ${dateLabel(selected.updatedAt)}` : ""}{selected.type === "Project" ? ` · ${selected.projectStatus ?? "Active"}` : ""}</p><div className="detail-content">{selected.content || <span className="detail-empty">No additional content.</span>}</div>
+        {selected.type === "Project" && <section className="related-section"><div className="related-heading">PROJECT CONTEXT <span>{linkedToProject(selected.id).length}</span></div>{linkedToProject(selected.id).length ? linkedToProject(selected.id).map((item) => <button className="related-item" key={item.id} onClick={() => setSelected(item)}><span className={`type-label label-${item.type.toLowerCase()}`}>{item.type}</span><strong>{item.title}</strong><span>→</span></button>) : <p className="related-empty">Captures linked to this project will appear here.</p>}</section>}
+        {selected.type === "Knowledge" && <section className="related-section"><div className="related-heading">RELATED KNOWLEDGE <span>{relatedKnowledge(selected).length}</span></div>{relatedKnowledge(selected).length ? relatedKnowledge(selected).map((item) => <button className="related-item" key={item.id} onClick={() => setSelected(item)}><span className="type-label label-knowledge">KNOWLEDGE</span><strong>{item.title}</strong><span>→</span></button>) : <p className="related-empty">Connect this to another knowledge entry when it is useful.</p>}</section>}
+        {selected.type !== "Project" && (selected.projectIds ?? []).some((id) => projects.some((project) => project.id === id)) && <section className="related-section"><div className="related-heading">IN PROJECTS</div>{projects.filter((project) => (selected.projectIds ?? []).includes(project.id)).map((project) => <button className="related-item" key={project.id} onClick={() => setSelected(project)}><span className="type-label label-project">PROJECT</span><strong>{project.title}</strong><span>→</span></button>)}</section>}
+        <div className="detail-actions"><button className="delete-button" disabled={storageBlocked} onClick={() => deleteCapture(selected)}>Delete</button><button className="save-button" onClick={() => editCapture(selected)}>Edit capture</button></div></section></div>}
 
       {commandOpen && <div className="overlay command-overlay" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setCommandOpen(false); }}><section className="command-dialog" role="dialog" aria-modal="true" aria-label="Command menu"><div className="command-input-row"><SearchIcon/><input autoFocus aria-label="Enter command or search" placeholder="Search, or type a command…" value={commandQuery} onChange={(event) => setCommandQuery(event.target.value)} onKeyDown={handleCommandKey}/><kbd>ESC</kbd></div><div className="command-group-label">CREATE SOMETHING</div><div className="command-grid">{captureTypes.map((item) => <button key={item} onClick={() => selectCommand(item)}><span>＋</span> {item}</button>)}</div><div className="command-group-label retrieval-label">GO SOMEWHERE</div><button className="command-search-row" onClick={() => selectCommand("Search")}><SearchIcon/><span>Search your space</span><kbd>↵</kbd></button></section></div>}
     </main>

@@ -19,7 +19,13 @@ export type CaptureRecord = {
   type: CaptureType;
   createdAt: string;
   updatedAt: string;
+  /** Optional links keep older local records readable. */
+  projectIds?: string[];
+  relatedIds?: string[];
+  projectStatus?: ProjectStatus;
 };
+
+export type ProjectStatus = "Idea" | "Planning" | "Active" | "Paused" | "Completed" | "Cancelled" | "Archived";
 
 const STORAGE_KEY = "myos.captures.v1";
 const captureTypes = new Set<CaptureType>([
@@ -36,7 +42,10 @@ function isCaptureRecord(value: unknown): value is CaptureRecord {
     && typeof record.type === "string"
     && captureTypes.has(record.type as CaptureType)
     && typeof record.createdAt === "string"
-    && typeof record.updatedAt === "string";
+    && typeof record.updatedAt === "string"
+    && (record.projectIds === undefined || (Array.isArray(record.projectIds) && record.projectIds.every((id) => typeof id === "string")))
+    && (record.relatedIds === undefined || (Array.isArray(record.relatedIds) && record.relatedIds.every((id) => typeof id === "string")))
+    && (record.projectStatus === undefined || ["Idea", "Planning", "Active", "Paused", "Completed", "Cancelled", "Archived"].includes(record.projectStatus as string));
 }
 
 export function loadCaptures(): CaptureRecord[] {
