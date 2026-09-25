@@ -5,7 +5,7 @@ import Image from "next/image";
 import type { FormEvent, KeyboardEvent } from "react";
 import { CaptureAttachment, CaptureRecord, CaptureType, loadCaptures, ProjectStatus, storeCaptures } from "@/lib/capture-storage";
 import { loadAttachment, removeAttachment, storeAttachment } from "@/lib/attachment-storage";
-import { normalizeMedia } from "@/lib/media-normalizer";
+import { AudioRecordingSession, normalizeMedia, startAudioRecording } from "@/lib/media-normalizer";
 
 const captureTypes: CaptureType[] = ["Capture", "Knowledge", "Idea", "Project", "Decision", "Milestone", "Goal", "Journal", "Book", "Resource", "Task", "Person"];
 const navigation = ["Home", "Timeline", "Knowledge", "Projects", "Decisions", "Milestones", "Ideas"];
@@ -18,6 +18,10 @@ type AttachmentDraft = { attachment: CaptureAttachment; blob: Blob; previewUrl: 
 
 function formatBytes(bytes: number): string {
   return bytes < 1024 * 1024 ? `${Math.max(1, Math.round(bytes / 1024))} KB` : `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function formatRecordingTime(seconds: number): string {
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
 }
 
 function localDateValue(date: Date): string {
@@ -72,6 +76,9 @@ export default function Home() {
   const [attachmentError, setAttachmentError] = useState("");
   const [processingMedia, setProcessingMedia] = useState(false);
   const [savingCapture, setSavingCapture] = useState(false);
+  const [recordingAudio, setRecordingAudio] = useState(false);
+  const [recordingStartedAt, setRecordingStartedAt] = useState(0);
+  const [recordingElapsed, setRecordingElapsed] = useState(0);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [selected, setSelected] = useState<CaptureRecord | null>(null);
   const [timelineView, setTimelineView] = useState<TimelineView>("month");
@@ -79,6 +86,7 @@ export default function Home() {
   const [timelineType, setTimelineType] = useState("All types");
   const editor = useRef<HTMLTextAreaElement>(null);
   const attachmentInput = useRef<HTMLInputElement>(null);
+  const audioRecording = useRef<AudioRecordingSession | null>(null);
 
   useEffect(() => {
     try {
@@ -118,6 +126,12 @@ export default function Home() {
       Object.values(urls).forEach(URL.revokeObjectURL);
     };
   }, [selected]);
+
+  useEffect(() => {
+    if (!recordingAudio || !recordingStartedAt) return;
+    const interval = window.setInterval(() => setRecordingElapsed(Math.floor((Date.now() - recordingStartedAt) / 1000)), 500);
+    return () => window.clearInterval(interval);
+  }, [recordingAudio, recordingStartedAt]);
 
   useEffect(() => {
     function onKeyDown(event: globalThis.KeyboardEvent) {
@@ -237,13 +251,16 @@ export default function Home() {
   }
 
   function discardCapture(force = false) {
-    if (!force && (processingMedia || savingCapture)) return;
+    if (!force && (processingMedia || savingCapture || recordingAudio)) return;
     setCaptureOpen(false);
     setEditingId(null);
     setExistingAttachments([]);
     clearDraftAttachments();
     setAttachmentError("");
     setProcessingMedia(false);
+    setRecordingAudio(false);
+    audioRecording.current?.cancel();
+    audioRecording.current = null;
   }
 
   async function addMedia(files: FileList | null) {
@@ -280,6 +297,55 @@ export default function Home() {
     } finally {
       setProcessingMedia(false);
       if (attachmentInput.current) attachmentInput.current.value = "";
+    }
+  }
+
+  async function finishRecording(session = audioRecording.current) {
+    if (!session) return;
+    audioRecording.current = null;
+    setRecordingAudio(false);
+    setProcessingMedia(true);
+    setAttachmentError("");
+    try {
+      const normalized = await session.stop();
+      const totalBytes = existingAttachments.reduce((sum, item) => sum + item.size, 0)
+        + newAttachments.reduce((sum, item) => sum + item.attachment.size, 0);
+      if (existingAttachments.length + newAttachments.length >= MAX_CAPTURE_ATTACHMENTS) {
+        throw new Error(`A capture can have up to ${MAX_CAPTURE_ATTACHMENTS} attachments.`);
+      }
+      if (totalBytes + normalized.blob.size > MAX_CAPTURE_ATTACHMENT_BYTES) {
+        throw new Error("Attachments on one capture must stay under 24 MB after optimization.");
+      }
+      const attachment: CaptureAttachment = { id: crypto.randomUUID(), name: normalized.name, mimeType: normalized.mimeType, size: normalized.blob.size };
+      setNewAttachments((current) => [...current, { attachment, blob: normalized.blob, previewUrl: URL.createObjectURL(normalized.blob) }]);
+      setRecordingElapsed(0);
+    } catch (error) {
+      setAttachmentError(error instanceof Error ? error.message : "The recording could not be saved.");
+    } finally {
+      setProcessingMedia(false);
+    }
+  }
+
+  async function beginRecording() {
+    if (processingMedia || savingCapture || recordingAudio || existingAttachments.length + newAttachments.length >= MAX_CAPTURE_ATTACHMENTS) return;
+    setAttachmentError("");
+    setProcessingMedia(true);
+    try {
+      const session = await startAudioRecording(() => {
+        const current = audioRecording.current;
+        if (current) {
+          setAttachmentError("The 5-minute recording limit was reached. Saving the audio…");
+          void finishRecording(current);
+        }
+      });
+      audioRecording.current = session;
+      setRecordingStartedAt(Date.now());
+      setRecordingElapsed(0);
+      setRecordingAudio(true);
+    } catch (error) {
+      setAttachmentError(error instanceof Error ? error.message : "The microphone could not be opened.");
+    } finally {
+      setProcessingMedia(false);
     }
   }
 
@@ -451,14 +517,14 @@ export default function Home() {
       </section>
 
       {captureOpen && <div className="overlay" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) discardCapture(); }}><section className="capture-dialog" role="dialog" aria-modal="true" aria-labelledby="capture-heading"><div className="dialog-top"><div className="dialog-mark">＋</div><button className="dialog-close" aria-label="Close capture" disabled={processingMedia || savingCapture} onClick={() => discardCapture()}>×</button></div><div className="dialog-eyebrow">{editingId ? "MAKE AN UPDATE" : "A THOUGHT TO KEEP"}</div><h2 id="capture-heading">{editingId ? "Edit this capture." : "Capture a thought."}</h2><p className="dialog-copy">{editingId ? "Your changes are saved on this device." : "Start with what matters. You can add details later."}</p><form onSubmit={saveCapture}><input className="title-input" aria-label="Capture title" placeholder="Give it a title (optional)" maxLength={160} value={title} onChange={(event) => setTitle(event.target.value)}/><textarea ref={editor} className="capture-editor" aria-label="Capture content" placeholder="What’s on your mind?" value={content} onChange={(event) => setContent(event.target.value)}/>
-        <section className="media-section" aria-label="Capture attachments"><div className="media-section-heading">ATTACHMENTS <span>{existingAttachments.length + newAttachments.length}/{MAX_CAPTURE_ATTACHMENTS}</span></div><input ref={attachmentInput} className="media-input" aria-label="Choose image or audio files" type="file" accept="image/jpeg,image/png,image/webp,audio/*" multiple disabled={processingMedia || savingCapture || existingAttachments.length + newAttachments.length >= MAX_CAPTURE_ATTACHMENTS} onChange={(event) => void addMedia(event.target.files)}/><button className="media-add-button" type="button" disabled={processingMedia || savingCapture || existingAttachments.length + newAttachments.length >= MAX_CAPTURE_ATTACHMENTS} onClick={() => attachmentInput.current?.click()}>＋ Add image or audio</button><p className="media-guidance">Images are resized and compressed. WAV is converted to compact Opus; compressed audio is kept as-is. Up to 5 files and 24 MB per capture.</p>
-          {(existingAttachments.length > 0 || newAttachments.length > 0) && <div className="media-file-list">{existingAttachments.map((item) => <div className="media-file-row" key={item.id}><span className="media-file-kind">{item.mimeType.startsWith("image/") ? "▧" : "♫"}</span><span className="media-file-name">{item.name}<small>{formatBytes(item.size)}</small></span><button type="button" aria-label={`Remove ${item.name}`} disabled={savingCapture || processingMedia} onClick={() => setExistingAttachments((current) => current.filter((attachment) => attachment.id !== item.id))}>×</button></div>)}{newAttachments.map((item) => <div className="media-file-row" key={item.attachment.id}><span className="media-file-kind">{item.attachment.mimeType.startsWith("image/") ? "▧" : "♫"}</span><span className="media-file-name">{item.attachment.name}<small>{formatBytes(item.attachment.size)} · optimized</small></span><button type="button" aria-label={`Remove ${item.attachment.name}`} disabled={savingCapture || processingMedia} onClick={() => removeNewAttachment(item.attachment.id)}>×</button></div>)}</div>}
-          {processingMedia && <p className="media-status" role="status">Optimizing file for storage…</p>}{attachmentError && <p className="media-error" role="alert">{attachmentError}</p>}
+        <section className="media-section" aria-label="Capture attachments"><div className="media-section-heading">ATTACHMENTS <span>{existingAttachments.length + newAttachments.length}/{MAX_CAPTURE_ATTACHMENTS}</span></div><input ref={attachmentInput} className="media-input" aria-label="Choose image or audio files" type="file" accept="image/jpeg,image/png,image/webp,audio/*" multiple disabled={processingMedia || savingCapture || recordingAudio || existingAttachments.length + newAttachments.length >= MAX_CAPTURE_ATTACHMENTS} onChange={(event) => void addMedia(event.target.files)}/><div className="media-actions"><button className="media-add-button" type="button" disabled={processingMedia || savingCapture || recordingAudio || existingAttachments.length + newAttachments.length >= MAX_CAPTURE_ATTACHMENTS} onClick={() => attachmentInput.current?.click()}>＋ Add image or audio</button>{recordingAudio ? <button className="record-button recording" type="button" onClick={() => void finishRecording()}><span className="record-indicator"/> Stop &amp; attach <time>{formatRecordingTime(recordingElapsed)}</time></button> : <button className="record-button" type="button" disabled={processingMedia || savingCapture || existingAttachments.length + newAttachments.length >= MAX_CAPTURE_ATTACHMENTS} onClick={() => void beginRecording()}><span className="record-indicator"/> Record audio</button>}</div><p className="media-guidance">Images are resized and compressed. WAV is converted to compact Opus; compressed audio is kept as-is. Recordings use compact audio encoding. Up to 5 files and 24 MB per capture.</p>
+          {(existingAttachments.length > 0 || newAttachments.length > 0) && <div className="media-file-list">{existingAttachments.map((item) => <div className="media-file-row" key={item.id}><span className="media-file-kind">{item.mimeType.startsWith("image/") ? "▧" : "♫"}</span><span className="media-file-name">{item.name}<small>{formatBytes(item.size)}</small></span><button type="button" aria-label={`Remove ${item.name}`} disabled={savingCapture || processingMedia || recordingAudio} onClick={() => setExistingAttachments((current) => current.filter((attachment) => attachment.id !== item.id))}>×</button></div>)}{newAttachments.map((item) => <div className="media-file-row" key={item.attachment.id}><span className="media-file-kind">{item.attachment.mimeType.startsWith("image/") ? "▧" : "♫"}</span><span className="media-file-name">{item.attachment.name}<small>{formatBytes(item.attachment.size)} · optimized</small></span><button type="button" aria-label={`Remove ${item.attachment.name}`} disabled={savingCapture || processingMedia || recordingAudio} onClick={() => removeNewAttachment(item.attachment.id)}>×</button>{item.attachment.mimeType.startsWith("audio/") && <audio className="draft-audio" controls preload="metadata" src={item.previewUrl} aria-label={`Play ${item.attachment.name}`}/>}</div>)}</div>}
+          {processingMedia && <p className="media-status" role="status">Preparing or optimizing audio…</p>}{recordingAudio && <p className="media-status" role="status">Recording · keep MYOS open; maximum 5 minutes.</p>}{attachmentError && <p className="media-error" role="alert">{attachmentError}</p>}
         </section>
         {type === "Project" && <label className="association-select">PROJECT STATUS <select value={projectStatus} onChange={(event) => setProjectStatus(event.target.value as ProjectStatus)}>{projectStatuses.map((status) => <option key={status}>{status}</option>)}</select></label>}
         {type !== "Project" && projects.length > 0 && <fieldset className="association-fieldset"><legend>IN PROJECTS <span>Optional</span></legend><div className="association-options">{projects.filter((project) => project.id !== editingId).map((project) => <label key={project.id}><input type="checkbox" checked={projectIds.includes(project.id)} onChange={(event) => setProjectIds((current) => event.target.checked ? [...current, project.id] : current.filter((id) => id !== project.id))}/><span>{project.title}</span></label>)}</div></fieldset>}
         {type === "Knowledge" && captures.some((item) => item.type === "Knowledge" && item.id !== editingId) && <fieldset className="association-fieldset"><legend>RELATED KNOWLEDGE <span>Optional</span></legend><div className="association-options">{captures.filter((item) => item.type === "Knowledge" && item.id !== editingId).map((item) => <label key={item.id}><input type="checkbox" checked={relatedIds.includes(item.id)} onChange={(event) => setRelatedIds((current) => event.target.checked ? [...current, item.id] : current.filter((id) => id !== item.id))}/><span>{item.title}</span></label>)}</div></fieldset>}
-        <div className="dialog-bottom"><label className="type-select-label">TYPE <select value={type} onChange={(event) => setType(event.target.value as CaptureType)}>{captureTypes.map((option) => <option key={option}>{option}</option>)}</select></label><button className="save-button" type="submit" disabled={storageBlocked || savingCapture || processingMedia || (!title.trim() && !content.trim() && !existingAttachments.length && !newAttachments.length)}>{savingCapture ? "Saving…" : editingId ? "Save changes" : "Save capture"} <span>↗</span></button></div></form><div className="local-note">Files are optimized and saved on this device · not synced</div></section></div>}
+        <div className="dialog-bottom"><label className="type-select-label">TYPE <select value={type} onChange={(event) => setType(event.target.value as CaptureType)}>{captureTypes.map((option) => <option key={option}>{option}</option>)}</select></label><button className="save-button" type="submit" disabled={storageBlocked || savingCapture || processingMedia || recordingAudio || (!title.trim() && !content.trim() && !existingAttachments.length && !newAttachments.length)}>{savingCapture ? "Saving…" : editingId ? "Save changes" : "Save capture"} <span>↗</span></button></div></form><div className="local-note">Files are optimized and saved on this device · not synced</div></section></div>}
 
       {selected && <div className="overlay" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setSelected(null); }}><section className="detail-dialog" role="dialog" aria-modal="true" aria-labelledby="detail-heading"><div className="dialog-top"><span className={`type-label label-${selected.type.toLowerCase()}`}>{selected.type.toUpperCase()}</span><button className="dialog-close" aria-label="Close details" onClick={() => setSelected(null)}>×</button></div><h2 id="detail-heading">{selected.title}</h2><p className="detail-date">Created {dateLabel(selected.createdAt)}{selected.updatedAt !== selected.createdAt ? ` · Updated ${dateLabel(selected.updatedAt)}` : ""}{selected.type === "Project" ? ` · ${selected.projectStatus ?? "Active"}` : ""}</p><div className="detail-content">{selected.content || <span className="detail-empty">No additional content.</span>}</div>
         {!!selected.attachments?.length && <section className="detail-attachments"><div className="related-heading">ATTACHMENTS <span>{selected.attachments.length}</span></div>{selected.attachments.map((item) => <div className="detail-attachment" key={item.id}><div className="detail-attachment-name"><strong>{item.name}</strong><span>{formatBytes(item.size)}</span>{attachmentUrls[item.id] && <a href={attachmentUrls[item.id]} download={item.name} aria-label={`Download ${item.name}`}>Download</a>}</div>{attachmentUrls[item.id] ? item.mimeType.startsWith("image/") ? <Image className="detail-image" src={attachmentUrls[item.id]} alt={item.name} width={800} height={600} unoptimized/> : item.mimeType.startsWith("audio/") ? <audio className="detail-audio" controls preload="metadata" src={attachmentUrls[item.id]}/> : null : <p className="related-empty">This file is unavailable in the local attachment store.</p>}</div>)}</section>}

@@ -3,8 +3,65 @@ const MAX_IMAGE_OUTPUT = 2 * 1024 * 1024;
 const MAX_AUDIO_SOURCE = 32 * 1024 * 1024;
 const MAX_AUDIO_OUTPUT = 18 * 1024 * 1024;
 const MAX_AUDIO_SECONDS = 20 * 60;
+const MAX_RECORDING_SECONDS = 5 * 60;
 
 export type NormalizedMedia = { blob: Blob; name: string; mimeType: string };
+export type AudioRecordingSession = { stop: () => Promise<NormalizedMedia>; cancel: () => void };
+
+export async function startAudioRecording(onLimitReached: () => void): Promise<AudioRecordingSession> {
+  if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
+    throw new Error("Audio recording is not supported in this browser.");
+  }
+  const stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } });
+  let recorder: MediaRecorder;
+  try {
+    const preferredType = ["audio/webm;codecs=opus", "audio/ogg;codecs=opus", "audio/mp4"].find((type) => MediaRecorder.isTypeSupported(type));
+    recorder = new MediaRecorder(stream, preferredType
+      ? { mimeType: preferredType, audioBitsPerSecond: 64000 }
+      : { audioBitsPerSecond: 64000 });
+  } catch {
+    stream.getTracks().forEach((track) => track.stop());
+    throw new Error("The microphone is available, but this browser cannot create a compressed audio recording.");
+  }
+
+  const chunks: Blob[] = [];
+  recorder.ondataavailable = (event) => { if (event.data.size) chunks.push(event.data); };
+  const completed = new Promise<Blob>((resolve, reject) => {
+    recorder.onstop = () => resolve(new Blob(chunks, { type: recorder.mimeType || "audio/webm" }));
+    recorder.onerror = () => reject(new Error("The audio recording could not be completed."));
+  });
+  try {
+    recorder.start(1000);
+  } catch {
+    stream.getTracks().forEach((track) => track.stop());
+    throw new Error("The audio recording could not be started.");
+  }
+  const timer = window.setTimeout(onLimitReached, MAX_RECORDING_SECONDS * 1000);
+  let stopped: Promise<NormalizedMedia> | null = null;
+
+  function stop(): Promise<NormalizedMedia> {
+    if (!stopped) {
+      window.clearTimeout(timer);
+      stopped = completed.then((blob) => {
+        if (!blob.size || blob.size > MAX_AUDIO_OUTPUT) throw new Error("This recording exceeded the 18 MB storage limit.");
+        const extension = blob.type.includes("ogg") ? "ogg" : blob.type.includes("mp4") ? "m4a" : "webm";
+        const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+        return { blob, name: `voice-note-${timestamp}.${extension}`, mimeType: blob.type || "audio/webm" };
+      }).finally(() => stream.getTracks().forEach((track) => track.stop()));
+      if (recorder.state === "recording") recorder.stop();
+    }
+    return stopped;
+  }
+
+  function cancel() {
+    window.clearTimeout(timer);
+    if (recorder.state === "recording") recorder.stop();
+    stream.getTracks().forEach((track) => track.stop());
+    void completed.catch(() => undefined);
+  }
+
+  return { stop, cancel };
+}
 
 function imageBlob(canvas: HTMLCanvasElement, mimeType: string, quality: number): Promise<Blob> {
   return new Promise((resolve, reject) => canvas.toBlob(
