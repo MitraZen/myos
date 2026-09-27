@@ -100,6 +100,7 @@ export default function Home() {
   const [recordingStartedAt, setRecordingStartedAt] = useState(0);
   const [recordingElapsed, setRecordingElapsed] = useState(0);
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [captureReturnProjectId, setCaptureReturnProjectId] = useState<string | null>(null);
   const [selected, setSelected] = useState<CaptureRecord | null>(null);
   const [timelineView, setTimelineView] = useState<TimelineView>("month");
   const [timelineDate, setTimelineDate] = useState("");
@@ -253,7 +254,7 @@ export default function Home() {
 
   function linkedToProject(projectId: string) {
     return captures.filter((item) => item.id !== projectId && (item.projectIds ?? []).includes(projectId))
-      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   }
 
   function relatedKnowledge(capture: CaptureRecord) {
@@ -378,8 +379,14 @@ export default function Home() {
 
   function discardCapture(force = false) {
     if (!force && (processingMedia || savingCapture || recordingAudio)) return;
+    const returnProject = captureReturnProjectId ? projects.find((item) => item.id === captureReturnProjectId) : null;
     setCaptureOpen(false);
     setEditingId(null);
+    setCaptureReturnProjectId(null);
+    if (returnProject) {
+      setActive("Projects");
+      setSelected(returnProject);
+    }
     setExistingAttachments([]);
     clearDraftAttachments();
     setAttachmentError("");
@@ -477,6 +484,7 @@ export default function Home() {
 
   function openNewCapture(nextType: CaptureType = "Capture") {
     setEditingId(null);
+    setCaptureReturnProjectId(null);
     setTitle("");
     setContent("");
     setType(nextType);
@@ -489,6 +497,12 @@ export default function Home() {
     setCaptureOpen(true);
     setSelected(null);
     setCommandOpen(false);
+  }
+
+  function openProjectEntry(project: CaptureRecord) {
+    openNewCapture();
+    setProjectIds([project.id]);
+    setCaptureReturnProjectId(project.id);
   }
 
   function editCapture(capture: CaptureRecord) {
@@ -563,8 +577,10 @@ export default function Home() {
         ? (captures.find((item) => item.id === editingId)?.attachments ?? []).filter((item) => !attachmentList.some((current) => current.id === item.id))
         : [];
       await Promise.allSettled(removedAttachments.map((item) => removeAttachment(item.id)));
+      const returnProject = captureReturnProjectId ? projects.find((item) => item.id === captureReturnProjectId) : null;
       discardCapture(true);
-      setActive("Home");
+      setActive(returnProject ? "Projects" : "Home");
+      if (returnProject) setSelected(returnProject);
       setQuery("");
     } catch (error) {
       await Promise.all(storedIds.map((id) => removeAttachment(id).catch(() => undefined)));
@@ -669,9 +685,9 @@ export default function Home() {
         {type === "Knowledge" && captures.some((item) => item.type === "Knowledge" && item.id !== editingId) && <fieldset className="association-fieldset"><legend>RELATED KNOWLEDGE <span>Optional</span></legend><div className="association-options">{captures.filter((item) => item.type === "Knowledge" && item.id !== editingId).map((item) => <label key={item.id}><input type="checkbox" checked={relatedIds.includes(item.id)} onChange={(event) => setRelatedIds((current) => event.target.checked ? [...current, item.id] : current.filter((id) => id !== item.id))}/><span>{item.title}</span></label>)}</div></fieldset>}
         <div className="dialog-bottom"><label className="type-select-label">TYPE <select value={type} onChange={(event) => setType(event.target.value as CaptureType)}>{captureTypes.map((option) => <option key={option} value={option}>{captureTypeLabel(option)}</option>)}</select></label><button className="save-button" type="submit" disabled={storageBlocked || savingCapture || processingMedia || recordingAudio || (!title.trim() && !content.trim() && !existingAttachments.length && !newAttachments.length)}>{savingCapture ? "Saving…" : editingId ? "Save changes" : "Save capture"} <span>↗</span></button></div></form><div className="local-note">Files are optimized and saved on this device · not synced</div></section></div>}
 
-      {selected && <div className="overlay" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setSelected(null); }}><section className="detail-dialog" role="dialog" aria-modal="true" aria-labelledby="detail-heading"><div className="dialog-top"><span className={`type-label label-${selected.type.toLowerCase()}`}>{captureTypeLabel(selected.type).toUpperCase()}</span><button className="dialog-close" aria-label="Close details" onClick={() => setSelected(null)}>×</button></div><h2 id="detail-heading">{selected.title}</h2><p className="detail-date">Created {dateLabel(selected.createdAt)}{selected.updatedAt !== selected.createdAt ? ` · Updated ${dateLabel(selected.updatedAt)}` : ""}{selected.type === "Project" ? ` · ${selected.projectStatus ?? "Active"}` : ""}</p><div className="detail-content">{selected.content || <span className="detail-empty">No additional content.</span>}</div>
+      {selected && <div className="overlay" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setSelected(null); }}><section className={`detail-dialog ${selected.type === "Project" ? "project-detail-dialog" : ""}`} role="dialog" aria-modal="true" aria-labelledby="detail-heading"><div className="dialog-top"><span className={`type-label label-${selected.type.toLowerCase()}`}>{captureTypeLabel(selected.type).toUpperCase()}</span><button className="dialog-close" aria-label="Close details" onClick={() => setSelected(null)}>×</button></div><h2 id="detail-heading">{selected.title}</h2><p className="detail-date">Created {dateLabel(selected.createdAt)}{selected.updatedAt !== selected.createdAt ? ` · Updated ${dateLabel(selected.updatedAt)}` : ""}{selected.type === "Project" ? ` · ${selected.projectStatus ?? "Active"}` : ""}</p><div className="detail-content">{selected.content || <span className="detail-empty">No additional content.</span>}</div>
+        {selected.type === "Project" && <section className="project-timeline"><div className="project-timeline-heading"><div className="related-heading">PROJECT TIMELINE <span>{linkedToProject(selected.id).length}</span></div><button className="text-action" onClick={() => openProjectEntry(selected)}>＋ Add entry</button></div>{linkedToProject(selected.id).length ? <div className="project-timeline-list">{linkedToProject(selected.id).map((item) => <button className="project-entry" key={item.id} onClick={() => setSelected(item)}><span className="project-entry-marker"/><span className="project-entry-copy"><span className="project-entry-meta"><span className={`type-label label-${item.type.toLowerCase()}`}>{captureTypeLabel(item.type)}</span><span>{dateLabel(item.createdAt)}</span></span><strong>{item.title}</strong>{item.content && <small>{item.content}</small>}</span><span className="project-entry-arrow">→</span></button>)}</div> : <div className="project-timeline-empty"><p>Keep project notes, decisions, photos, and progress as dated entries.</p><button className="text-action" onClick={() => openProjectEntry(selected)}>＋ Add the first entry</button></div>}</section>}
         {!!selected.attachments?.length && <section className="detail-attachments"><div className="related-heading">ATTACHMENTS <span>{selected.attachments.length}</span></div>{selected.attachments.map((item) => <div className="detail-attachment" key={item.id}><div className="detail-attachment-name"><strong>{item.name}</strong><span>{formatBytes(item.size)}</span>{attachmentUrls[item.id] && <a href={attachmentUrls[item.id]} download={item.name} aria-label={`Download ${item.name}`}>Download</a>}</div>{attachmentUrls[item.id] ? item.mimeType.startsWith("image/") ? <Image className="detail-image" src={attachmentUrls[item.id]} alt={item.name} width={800} height={600} unoptimized/> : item.mimeType.startsWith("audio/") ? <audio className="detail-audio" controls preload="metadata" src={attachmentUrls[item.id]}/> : null : <p className="related-empty">This file is unavailable in the local attachment store.</p>}</div>)}</section>}
-        {selected.type === "Project" && <section className="related-section"><div className="related-heading">PROJECT CONTEXT <span>{linkedToProject(selected.id).length}</span></div>{linkedToProject(selected.id).length ? linkedToProject(selected.id).map((item) => <button className="related-item" key={item.id} onClick={() => setSelected(item)}><span className={`type-label label-${item.type.toLowerCase()}`}>{captureTypeLabel(item.type)}</span><strong>{item.title}</strong><span>→</span></button>) : <p className="related-empty">Captures linked to this project will appear here.</p>}</section>}
         {selected.type === "Knowledge" && <section className="related-section"><div className="related-heading">RELATED KNOWLEDGE <span>{relatedKnowledge(selected).length}</span></div>{relatedKnowledge(selected).length ? relatedKnowledge(selected).map((item) => <button className="related-item" key={item.id} onClick={() => setSelected(item)}><span className="type-label label-knowledge">KNOWLEDGE</span><strong>{item.title}</strong><span>→</span></button>) : <p className="related-empty">Connect this to another knowledge entry when it is useful.</p>}</section>}
         {selected.type !== "Project" && (selected.projectIds ?? []).some((id) => projects.some((project) => project.id === id)) && <section className="related-section"><div className="related-heading">IN PROJECTS</div>{projects.filter((project) => (selected.projectIds ?? []).includes(project.id)).map((project) => <button className="related-item" key={project.id} onClick={() => setSelected(project)}><span className="type-label label-project">PROJECT</span><strong>{project.title}</strong><span>→</span></button>)}</section>}
         <div className="detail-actions"><button className="delete-button" disabled={storageBlocked} onClick={() => deleteCapture(selected)}>Delete</button><button className="save-button" onClick={() => editCapture(selected)}>Edit capture</button></div></section></div>}
