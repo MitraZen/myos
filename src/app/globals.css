@@ -152,3 +152,5 @@
 .project-timeline-empty{padding:8px 0 14px;border-top:1px solid var(--line)}
 .project-timeline-empty p{margin:3px 0 8px;color:#85877f;font-size:11px;line-height:1.6}
 @media(max-width:520px){.project-entry-copy>strong{font-size:17px}.project-entry-meta{font-size:10px}.project-entry-copy>small{font-size:12px}}
+.detail-content a{color:#527254;text-decoration:underline;text-decoration-color:#a8b9a4;text-underline-offset:2px;overflow-wrap:anywhere}
+.detail-content a:hover{color:#344d36;text-decoration-color:currentColor}
