@@ -240,17 +240,38 @@ export default function Home() {
     return () => window.removeEventListener("keydown", onKeyDown);
   });
 
-  const visibleCaptures = useMemo(() => captures
+  const capturesWithProjectActivity = useMemo(() => {
+    const latestProjectActivity = new Map<string, string>();
+    for (const capture of captures) {
+      if (capture.type === "Project") continue;
+      for (const projectId of capture.projectIds ?? []) {
+        const activityAt = capture.updatedAt || capture.createdAt;
+        if (activityAt > (latestProjectActivity.get(projectId) ?? "")) latestProjectActivity.set(projectId, activityAt);
+      }
+    }
+    return captures.map((capture) => {
+      if (capture.type !== "Project") return capture;
+      const activityAt = latestProjectActivity.get(capture.id);
+      return activityAt && activityAt > capture.updatedAt ? { ...capture, updatedAt: activityAt } : capture;
+    });
+  }, [captures]);
+
+  const visibleCaptures = useMemo(() => capturesWithProjectActivity
     .filter((item) => {
       const text = `${item.title} ${item.content} ${captureTypeLabel(item.type)}`.toLowerCase();
       const matchesQuery = text.includes(query.trim().toLowerCase());
       const typeForSection: Record<string, CaptureType> = { Knowledge: "Knowledge", Projects: "Project", Decisions: "Decision", Milestones: "Milestone", Ideas: "Idea", Media: "Media", Goals: "Goal", Journal: "Journal", Books: "Book", Resources: "Resource", Tasks: "Task", People: "Person", Captures: "Capture" };
       const matchesSection = active === "Home" || active === "Search" || active === "Timeline"
         || item.type === typeForSection[active];
-      return matchesQuery && matchesSection;
+      const isProjectEntryOnHome = active === "Home" && (item.projectIds?.length ?? 0) > 0;
+      return matchesQuery && matchesSection && !isProjectEntryOnHome;
     })
-    .sort((a, b) => b.createdAt.localeCompare(a.createdAt)), [captures, query, active]);
-  const projects = useMemo(() => captures.filter((item) => item.type === "Project").sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)), [captures]);
+    .sort((a, b) => {
+      const aRecentAt = active === "Home" && a.type === "Project" ? a.updatedAt : a.createdAt;
+      const bRecentAt = active === "Home" && b.type === "Project" ? b.updatedAt : b.createdAt;
+      return bRecentAt.localeCompare(aRecentAt);
+    }), [capturesWithProjectActivity, query, active]);
+  const projects = useMemo(() => capturesWithProjectActivity.filter((item) => item.type === "Project").sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)), [capturesWithProjectActivity]);
 
   function linkedToProject(projectId: string) {
     return captures.filter((item) => item.id !== projectId && (item.projectIds ?? []).includes(projectId))
@@ -564,12 +585,22 @@ export default function Home() {
         };
         next = [capture, ...captures];
       }
+      const previousProjectIds = editingId ? captures.find((item) => item.id === editingId)?.projectIds ?? [] : [];
+      const touchedProjectIds = new Set([...previousProjectIds, ...(type === "Project" ? [] : projectIds)]);
+      if (touchedProjectIds.size) {
+        next = next.map((item) => item.type === "Project" && touchedProjectIds.has(item.id)
+          ? { ...item, updatedAt: now }
+          : item);
+      }
       if (!persistCaptures(next)) throw new Error("The capture could not be saved. Your existing attachment files were kept.");
       if (user) {
-        const savedCapture = next.find((item) => item.id === (editingId ?? next[0]?.id));
-        if (savedCapture) {
-          try { await saveCloudCapture(user.id, savedCapture); }
-          catch (error) { setStorageError(`Saved on this device, but cloud sync failed: ${error instanceof Error ? error.message : "please retry"}`); }
+        const changedIds = new Set([editingId ?? next[0]?.id, ...touchedProjectIds]);
+        try {
+          for (const changedCapture of next.filter((item) => changedIds.has(item.id))) {
+            await saveCloudCapture(user.id, changedCapture);
+          }
+        } catch (error) {
+          setStorageError(`Saved on this device, but cloud sync failed: ${error instanceof Error ? error.message : "please retry"}`);
         }
       }
 
@@ -577,7 +608,7 @@ export default function Home() {
         ? (captures.find((item) => item.id === editingId)?.attachments ?? []).filter((item) => !attachmentList.some((current) => current.id === item.id))
         : [];
       await Promise.allSettled(removedAttachments.map((item) => removeAttachment(item.id)));
-      const returnProject = captureReturnProjectId ? projects.find((item) => item.id === captureReturnProjectId) : null;
+      const returnProject = captureReturnProjectId ? next.find((item) => item.id === captureReturnProjectId) ?? null : null;
       discardCapture(true);
       setActive(returnProject ? "Projects" : "Home");
       if (returnProject) setSelected(returnProject);
@@ -593,14 +624,25 @@ export default function Home() {
   function deleteCapture(capture: CaptureRecord) {
     if (storageBlocked) return;
     if (!window.confirm(`Delete “${capture.title}”? This cannot be undone.`)) return;
-    const saved = persistCaptures(captures.filter((item) => item.id !== capture.id).map((item) => ({
-      ...item,
-      projectIds: item.projectIds?.filter((id) => id !== capture.id),
-      relatedIds: item.relatedIds?.filter((id) => id !== capture.id),
-    })), [capture.id]);
+    const touchedProjectIds = new Set(capture.projectIds ?? []);
+    const now = new Date().toISOString();
+    const next = captures.filter((item) => item.id !== capture.id).map((item) => {
+      if (item.type === "Project" && touchedProjectIds.has(item.id)) return { ...item, updatedAt: now };
+      return {
+        ...item,
+        projectIds: item.projectIds?.filter((id) => id !== capture.id),
+        relatedIds: item.relatedIds?.filter((id) => id !== capture.id),
+      };
+    });
+    const saved = persistCaptures(next, [capture.id]);
     if (!saved) return;
     void Promise.all((capture.attachments ?? []).map((item) => removeAttachment(item.id).catch(() => undefined)));
-    if (user) void deleteCloudCapture(user.id, capture.id).catch((error: unknown) => setStorageError(`Deleted locally, but cloud delete failed: ${error instanceof Error ? error.message : "please retry"}`));
+    if (user) void (async () => {
+      await deleteCloudCapture(user.id, capture.id);
+      for (const project of next.filter((item) => item.type === "Project" && touchedProjectIds.has(item.id))) {
+        await saveCloudCapture(user.id, project);
+      }
+    })().catch((error: unknown) => setStorageError(`Deleted locally, but cloud sync failed: ${error instanceof Error ? error.message : "please retry"}`));
     setSelected(null);
   }
 
@@ -661,7 +703,7 @@ export default function Home() {
           {storageError && <p className="storage-alert" role="status">{storageError}</p>}
           {user && localImportCount > 0 && <section className="import-banner"><div><strong>{localImportCount} capture{localImportCount === 1 ? "" : "s"} saved on this device</strong><p>Add them to your private account to see them on your other devices. Existing account records will be kept.</p></div><button className="save-button" onClick={() => void importLocalCaptures()} disabled={cloudBusy}>{cloudBusy ? "Adding…" : "Add to my account"}</button></section>}
           <div className="content-grid"><section className="activity-column"><div className="timeline-day"><div className="timeline-date"><span className="timeline-day-num">⌂</span><span>LOCAL<br/>LIBRARY</span></div><div className="timeline-rule"/><div className="day-activity"><span className="activity-pip"/><span>{timelineCaptures.length ? `${timelineCaptures.length} ${timelineCaptures.length === 1 ? "capture" : "captures"}` : ready ? "Your library is quiet" : "Loading"}</span></div></div>
-          {active === "Projects" ? <div className="project-list">{projects.map((project) => <button type="button" className="project-list-row" key={project.id} onClick={() => setSelected(project)}><span className="project-list-symbol">▱</span><span className="project-list-copy"><strong>{project.title}</strong><small>{project.content || "No description yet."}</small></span><span className={`project-status status-${(project.projectStatus ?? "Active").toLowerCase()}`}>{project.projectStatus ?? "Active"}</span><span className="project-related-count">{linkedToProject(project.id).length} linked</span><span className="project-list-arrow">→</span></button>)}{projects.length === 0 && <div className="empty-state"><span className="empty-icon">▱</span><h3>{ready ? "Start a project" : "Loading your projects…"}</h3><p>Give an active effort a home. Related captures and knowledge can be linked as you go.</p><button onClick={() => openNewCapture("Project")}>＋ Create a project</button></div>}</div> : timelineCaptures.length ? <div className="capture-list">{captureGroups.map((group) => <section className="capture-group" key={group.key}>{group.label && <h3 className="timeline-group-title">{group.label}</h3>}{group.captures.map((item) => <article className="capture-row" key={item.id}><div className={`type-marker marker-${item.type.toLowerCase()}`}>{item.type === "Knowledge" ? "▤" : item.type === "Decision" ? "◇" : item.type === "Idea" ? "✧" : item.type === "Project" ? "▱" : item.type === "Media" ? "▣" : "·"}</div><button type="button" className="capture-body capture-open-button" aria-label={`Open ${item.title}`} onClick={() => setSelected(item)}><div className="capture-meta"><span className={`type-label label-${item.type.toLowerCase()}`}>{captureTypeLabel(item.type)}</span><span className="meta-dot">·</span><span>{dateLabel(item.createdAt)}</span>{projects.filter((project) => (item.projectIds ?? []).includes(project.id)).map((project) => <span className="capture-project-context" key={project.id}>↳ {project.title}</span>)}{item.updatedAt !== item.createdAt && <span className="edited-label">Edited</span>}</div><h3>{item.title}</h3><p>{item.content || "No additional content."}</p></button><button className="more-button" aria-label={`Open ${item.title}`} onClick={(event) => { event.stopPropagation(); setSelected(item); }}>···</button></article>)}</section>)}</div> : <div className="empty-state"><span className="empty-icon">⌕</span><h3>{ready ? query ? "No matches yet" : active === "Timeline" ? "No captures in this period" : "Nothing captured yet" : "Loading your captures…"}</h3><p>{ready ? query ? "Try another search, or capture a thought to start building your library." : active === "Timeline" ? "Choose another date or time range, or capture a thought to start your history." : "Save the thought first. Add context whenever you are ready." : ""}</p>{ready && <button onClick={() => openNewCapture()}>＋ Capture something</button>}</div>}
+          {active === "Projects" ? <div className="project-list">{projects.map((project) => <button type="button" className="project-list-row" key={project.id} onClick={() => setSelected(project)}><span className="project-list-symbol">▱</span><span className="project-list-copy"><strong>{project.title}</strong><small>{project.content || "No description yet."}</small></span><span className={`project-status status-${(project.projectStatus ?? "Active").toLowerCase()}`}>{project.projectStatus ?? "Active"}</span><span className="project-related-count">{linkedToProject(project.id).length} linked</span><span className="project-list-arrow">→</span></button>)}{projects.length === 0 && <div className="empty-state"><span className="empty-icon">▱</span><h3>{ready ? "Start a project" : "Loading your projects…"}</h3><p>Give an active effort a home. Related captures and knowledge can be linked as you go.</p><button onClick={() => openNewCapture("Project")}>＋ Create a project</button></div>}</div> : timelineCaptures.length ? <div className="capture-list">{captureGroups.map((group) => <section className="capture-group" key={group.key}>{group.label && <h3 className="timeline-group-title">{group.label}</h3>}{group.captures.map((item) => <article className="capture-row" key={item.id}><div className={`type-marker marker-${item.type.toLowerCase()}`}>{item.type === "Knowledge" ? "▤" : item.type === "Decision" ? "◇" : item.type === "Idea" ? "✧" : item.type === "Project" ? "▱" : item.type === "Media" ? "▣" : "·"}</div><button type="button" className="capture-body capture-open-button" aria-label={`Open ${item.title}`} onClick={() => setSelected(item)}><div className="capture-meta"><span className={`type-label label-${item.type.toLowerCase()}`}>{captureTypeLabel(item.type)}</span><span className="meta-dot">·</span><span>{item.type === "Project" && item.updatedAt !== item.createdAt ? `Updated ${dateLabel(item.updatedAt)}` : dateLabel(item.createdAt)}</span>{item.type !== "Project" && item.updatedAt !== item.createdAt && <span className="edited-label">Edited</span>}</div><h3>{item.title}</h3><p>{item.content || "No additional content."}</p></button><button className="more-button" aria-label={`Open ${item.title}`} onClick={(event) => { event.stopPropagation(); setSelected(item); }}>···</button></article>)}</section>)}</div> : <div className="empty-state"><span className="empty-icon">⌕</span><h3>{ready ? query ? "No matches yet" : active === "Timeline" ? "No captures in this period" : "Nothing captured yet" : "Loading your captures…"}</h3><p>{ready ? query ? "Try another search, or capture a thought to start building your library." : active === "Timeline" ? "Choose another date or time range, or capture a thought to start your history." : "Save the thought first. Add context whenever you are ready." : ""}</p>{ready && <button onClick={() => openNewCapture()}>＋ Capture something</button>}</div>}
             {active !== "Timeline" && <button className="see-all" onClick={showTimeline}>View timeline <span>→</span></button>}
           </section>
 
