@@ -317,13 +317,17 @@ export default function Home() {
     return target instanceof HTMLElement && (target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName));
   }
 
-  function persistCaptures(next: CaptureRecord[]): boolean {
+  function persistCaptures(next: CaptureRecord[], deletedLocalIds: string[] = []): boolean {
     if (storageBlocked) return false;
     try {
       const nextIds = new Set(next.map((item) => item.id));
-      const preserved = user ? preservedLocalCaptures.current.filter((item) => !nextIds.has(item.id)) : [];
+      const deletedIds = new Set(deletedLocalIds);
+      const remainingLocal = preservedLocalCaptures.current.filter((item) => !deletedIds.has(item.id));
+      const preserved = user ? remainingLocal.filter((item) => !nextIds.has(item.id)) : [];
       storeCaptures([...preserved, ...next]);
+      if (deletedLocalIds.length) preservedLocalCaptures.current = remainingLocal;
       setCaptures(next);
+      if (user) setLocalImportCount(remainingLocal.filter((item) => !nextIds.has(item.id)).length);
       setStorageError("");
       return true;
     } catch {
@@ -576,7 +580,7 @@ export default function Home() {
       ...item,
       projectIds: item.projectIds?.filter((id) => id !== capture.id),
       relatedIds: item.relatedIds?.filter((id) => id !== capture.id),
-    })));
+    })), [capture.id]);
     if (!saved) return;
     void Promise.all((capture.attachments ?? []).map((item) => removeAttachment(item.id).catch(() => undefined)));
     if (user) void deleteCloudCapture(user.id, capture.id).catch((error: unknown) => setStorageError(`Deleted locally, but cloud delete failed: ${error instanceof Error ? error.message : "please retry"}`));
