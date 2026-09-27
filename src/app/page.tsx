@@ -50,6 +50,12 @@ function navigationLabel(item: string): string {
   return item === "Media" ? captureTypeLabel("Media") : item;
 }
 
+function pushOverlayHistoryEntry() {
+  const currentState = window.history.state;
+  const state = currentState && typeof currentState === "object" ? currentState : {};
+  window.history.pushState({ ...state, myosOverlay: true }, "", window.location.href);
+}
+
 function linkifyContent(content: string) {
   return content.split(/(https?:\/\/[^\s]+|www\.[^\s]+)/gi).map((part, index) => {
     if (!/^(https?:\/\/|www\.)/i.test(part)) return part;
@@ -120,6 +126,48 @@ export default function Home() {
   const attachmentInput = useRef<HTMLInputElement>(null);
   const audioRecording = useRef<AudioRecordingSession | null>(null);
   const preservedLocalCaptures = useRef<CaptureRecord[]>([]);
+  const discardCaptureRef = useRef<(force?: boolean) => void>(() => {});
+  const overlayHistoryActive = useRef(false);
+  const overlayOpen = captureOpen || commandOpen || mobileMoreOpen || selected !== null;
+
+  useEffect(() => {
+    if (overlayOpen && !overlayHistoryActive.current) {
+      pushOverlayHistoryEntry();
+      overlayHistoryActive.current = true;
+    } else if (!overlayOpen && overlayHistoryActive.current) {
+      overlayHistoryActive.current = false;
+      if (window.history.state?.myosOverlay) window.history.back();
+    }
+  }, [overlayOpen]);
+
+  useEffect(() => {
+    function onPopState() {
+      if (!overlayHistoryActive.current) return;
+      overlayHistoryActive.current = false;
+      let overlayRemains = false;
+      if (captureOpen) {
+        if (savingCapture || processingMedia || recordingAudio) {
+          pushOverlayHistoryEntry();
+          overlayHistoryActive.current = true;
+          return;
+        }
+        overlayRemains = Boolean(captureReturnProjectId && captures.some((item) => item.type === "Project" && item.id === captureReturnProjectId));
+        discardCaptureRef.current(true);
+      } else if (commandOpen) {
+        setCommandOpen(false);
+        overlayRemains = mobileMoreOpen || selected !== null;
+      } else if (mobileMoreOpen) {
+        setMobileMoreOpen(false);
+        overlayRemains = selected !== null || captureOpen;
+      } else if (selected) setSelected(null);
+      if (overlayRemains) {
+        pushOverlayHistoryEntry();
+        overlayHistoryActive.current = true;
+      }
+    }
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, [captureOpen, captureReturnProjectId, captures, commandOpen, mobileMoreOpen, processingMedia, recordingAudio, savingCapture, selected]);
 
   useEffect(() => {
     let cancelled = false;
@@ -427,6 +475,7 @@ export default function Home() {
     audioRecording.current?.cancel();
     audioRecording.current = null;
   }
+  discardCaptureRef.current = discardCapture;
 
   async function addMedia(files: FileList | null) {
     if (!files) return;
